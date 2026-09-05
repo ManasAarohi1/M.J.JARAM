@@ -100,7 +100,7 @@ def _create_loading_screen(icon_path: Optional[str]) -> QSplashScreen:
     title_font = QFont("Segoe UI", 22)
     title_font.setBold(True)
     painter.setFont(title_font)
-    painter.drawText(QRect(0, height - 150, width, 40), Qt.AlignHCenter, "J.JARAM is starting")
+    painter.drawText(QRect(0, height - 150, width, 40), Qt.AlignHCenter, "M.J.JARAM is starting")
 
     painter.setPen(QColor(TEXT_SECONDARY))
     painter.setFont(QFont("Segoe UI", 11))
@@ -202,7 +202,7 @@ def main():
         pass
 
     app = QApplication(sys.argv)
-    app.setApplicationName("J.JARAM")
+    app.setApplicationName("M.J.JARAM")
     app.setApplicationVersion(APP_FOOTER)
     app.setOrganizationName("cresqnt")
     # Qt 6 ships a Windows 11 style that can change widget visuals. Force the
@@ -270,8 +270,8 @@ def main():
 
             msg = QMessageBox()
             msg.setIcon(QMessageBox.Icon.Critical)
-            msg.setWindowTitle("J.JARAM failed to start")
-            msg.setText("An error occurred while starting J.JARAM.")
+            msg.setWindowTitle("M.J.JARAM failed to start")
+            msg.setText("An error occurred while starting M.J.JARAM.")
             if log_path:
                 msg.setInformativeText(f"Crash log written to:\n{log_path}")
             msg.setDetailedText(tb)

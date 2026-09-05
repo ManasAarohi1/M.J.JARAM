@@ -2,6 +2,7 @@ PySide6
 psutil
 requests
 pywin32
+undetected-chromedriver
 selenium
 numpy
 Pillow

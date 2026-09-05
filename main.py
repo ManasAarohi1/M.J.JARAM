@@ -913,7 +913,7 @@ class GameLauncher:
 
         link = str(private_server_link or "").strip()
 
-        pattern1 = r'roblox\.com/games/(\d+)/[^?]*\?privateServerLinkCode=([A-Za-z0-9_-]+)'
+        pattern1 = r'roblox\.com/games/(\d+)(?:/[^?]*)?\?privateServerLinkCode=([A-Za-z0-9_-]+)'
         m1 = re.search(pattern1, link)
         if m1:
             return m1.group(1), m1.group(2), "direct", cookie

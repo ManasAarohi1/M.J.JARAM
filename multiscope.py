@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os, re, json, time, threading, requests
+import time as _t
 import requests.exceptions as _rq_exc
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -38,21 +39,89 @@ except Exception:
         return int(0x3BA55D), ""     # default color, empty thumbnail
     def biome_names() -> list[str]:
         return ["NORMAL"]
-APP_FOOTER = "J.JARAM JX 2x81"
+APP_FOOTER = "M.J.JARAM JX 2x71"
 HARD_EVERYONE_BIOMES = {"GLITCHED", "DREAMSPACE", "CYBERSPACE"}
+
+# Webhook send retry budget per hook, by biome tier. Priority biomes are rare and
+# high-value, so a send is retried more before giving up and moving to the next
+# hook; ordinary biomes get fewer (a transient miss is cheap). A non-retryable 4xx
+# (dead/invalid hook) stops immediately regardless of these. Retries only help
+# against transient Discord failures (429 rate limit / 5xx / timeout).
+# ponytail: tune these two numbers, nothing else. Set NORMAL to 1 if you'd rather
+# a common-biome send try once and move straight to the next webhook.
+PRIORITY_WEBHOOK_ATTEMPTS = 5   # GLITCHED / CYBERSPACE / DREAMSPACE
+NORMAL_WEBHOOK_ATTEMPTS = 3     # every other biome
+
+# Player-tracker: joins seen while one of these biomes is active are buffered and
+# only flushed to the webhook once the biome ends.
+PLAYER_TRACKER_DELAY_BIOMES = {"GLITCHED", "DREAMSPACE", "CYBERSPACE", "SINGULARITY"}
+_PLAYER_JOIN_RE = re.compile(
+    r"load failed in Workspace\.(?P<PlayerName>[0-9a-zA-Z]+(_[0-9a-zA-Z]+)?)\.Humanoid\.Clothes:",
+    re.MULTILINE,
+)
 _LOOKUP_SAVE_LOCK = threading.Lock()
 # ------------------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------------------
 
-def _post_webhook(url: str, payload: dict) -> None:
+def _post_webhook(
+    url: str,
+    payload: dict,
+    *,
+    attempts: int = 1,
+    on_fail=None,
+    label: str = "",
+) -> bool:
+    """POST a Discord webhook, retrying transient failures.
+
+    Returns True on a 2xx. Retries only transient errors (HTTP 429 honoring
+    Retry-After, 5xx, timeouts / connection errors) up to `attempts` times with
+    backoff. A non-retryable 4xx (401/403/404 = dead or invalid hook) stops
+    immediately -- hammering a deleted webhook is pointless. On final failure,
+    `on_fail(label, status)` is called (best-effort) so the caller can alert/log.
+    """
     if not url:
-        return
+        return False
     try:
         import requests
-        requests.post(url, json=payload, timeout=10)
     except Exception:
-        pass
+        return False
+    n = max(1, int(attempts))
+    last = "no attempt"
+    for i in range(n):
+        try:
+            r = requests.post(url, json=payload, timeout=10)
+            code = r.status_code
+            if 200 <= code < 300:
+                return True
+            if code == 429:
+                last = "HTTP 429 (rate limited)"
+                if i < n - 1:
+                    try:
+                        ra = float(r.headers.get("Retry-After") or 0)
+                    except Exception:
+                        ra = 0.0
+                    _t.sleep(min(max(ra, 1.0), 15.0))
+                continue
+            if 500 <= code < 600:
+                last = f"HTTP {code}"
+                if i < n - 1:
+                    _t.sleep(min(1.5 * (i + 1), 8.0))
+                continue
+            # Non-retryable (bad/deleted hook, malformed payload): give up now.
+            last = f"HTTP {code}"
+            break
+        except Exception as e:
+            last = type(e).__name__ or "network error"
+            if i < n - 1:
+                _t.sleep(min(1.0 * (i + 1), 6.0))
+            continue
+    if on_fail is not None:
+        try:
+            on_fail(label, last)
+        except Exception:
+            pass
+    return False
 
 def _normalize_role_ping_id(value: object) -> str:
     text = str(value or "").strip()
@@ -675,6 +744,10 @@ class ServerScope:
     last_menu_ts_by_uid: Dict[str, float] = field(default_factory=dict)
     events: int = 0
 
+    # Player tracker: buffered joins (flushed on special-biome end) + de-dupe set
+    player_join_buffer: List[str] = field(default_factory=list)
+    player_seen: Set[str] = field(default_factory=set)
+
 @dataclass
 class Cursor:
     path: Optional[str] = None
@@ -769,6 +842,7 @@ class MultiScopeEngine:
 
         # Webhooks
         self._biome_webhooks: List[dict] = []
+        self._player_tracker_hook: str = ""
         self._skip_webhook_unknown_context = False
 
         self._lock = threading.Lock()
@@ -810,6 +884,14 @@ class MultiScopeEngine:
 
         # Webhook delivery remains off the reader pool.
         self._send_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ms-send")
+
+        # Webhook-failure alerting: when a biome send exhausts its retries we push
+        # ONE throttled "webhook_failed" event to the GUI (which alerts the CAP
+        # webhook). Throttled so a Discord outage -- which fails many sends at once
+        # -- can't spam the alert hook or trip its own rate limit.
+        self._webhook_alert_lock = threading.Lock()
+        self._webhook_alert_last_ts = 0.0
+        self._webhook_alert_min_interval = 300.0  # ponytail: 5-min throttle
 
         self._per_read_cap = 256 * 1024
         self._global_read_cap = 4 * 1024 * 1024
@@ -860,6 +942,7 @@ class MultiScopeEngine:
         biome_modes: Optional[Dict[str, str]] = None,
         skip_webhook_unknown_context: bool = False,
         in_menu_none_timeout_seconds: float = 120.0,
+        player_tracker_hook: str = "",
     ) -> None:
         lock_enforced = self._is_bm_lock_enforced()
         lock_disabled = not lock_enforced
@@ -940,6 +1023,7 @@ class MultiScopeEngine:
         self._bm_lock_confirmed = not lock_disabled
         self._lock_forced_biomes = forced_biomes
         self._skip_webhook_unknown_context = bool(skip_webhook_unknown_context)
+        self._player_tracker_hook = (player_tracker_hook or "").strip()
         try:
             self._in_menu_none_timeout_seconds = max(
                 1.0,
@@ -1572,6 +1656,35 @@ class MultiScopeEngine:
             self._events.clear()
         return ev
 
+    def _on_webhook_failed(self, label: str, status: str) -> None:
+        """Called (on a send-executor thread) when a webhook send gives up.
+
+        Always logs. Emits a throttled 'webhook_failed' event so the GUI can post
+        an error embed to the CAP/alert webhook. Throttle keeps a Discord outage
+        from spamming that hook.
+        """
+        try:
+            self._log(f"[Webhook] {label or 'send'} failed after retries: {status}")
+        except Exception:
+            pass
+        now = _t.time()
+        try:
+            with self._webhook_alert_lock:
+                if (now - self._webhook_alert_last_ts) < self._webhook_alert_min_interval:
+                    return
+                self._webhook_alert_last_ts = now
+        except Exception:
+            pass
+        msg = (
+            f"{label or 'A biome webhook'} could not be delivered ({status}). "
+            f"Retries exhausted -- some alerts may not have sent. This is usually a "
+            f"Discord outage or rate limit and recovers on its own."
+        )
+        try:
+            self._emit_event("webhook_failed", "", msg)
+        except Exception:
+            pass
+
     @staticmethod
     def _recompute_scope_menu(scope: ServerScope) -> None:
         known = []
@@ -2158,6 +2271,53 @@ class MultiScopeEngine:
             return True
 
 
+    def _scan_player_joins(self, uid: str, text: str) -> None:
+        names = []
+        for m in _PLAYER_JOIN_RE.finditer(text):
+            nm = (m.group("PlayerName") or "").strip()
+            if nm:
+                names.append(nm)
+        if not names:
+            return
+        server_key = self._server_key_for(uid)
+        scope = self._scopes.setdefault(server_key, ServerScope(server_key))
+        fresh = []
+        for nm in names:
+            if nm in scope.player_seen:
+                continue
+            scope.player_seen.add(nm)
+            fresh.append(nm)
+        if not fresh:
+            return
+        cur_biome = (scope.last_biome or "").upper()
+        if cur_biome in PLAYER_TRACKER_DELAY_BIOMES:
+            # Buffer; flush when this special biome ends.
+            scope.player_join_buffer.extend(fresh)
+        else:
+            self._send_player_tracker(server_key, cur_biome or "NORMAL", fresh)
+
+    def _send_player_tracker(self, server_key: str, biome: str, names: list, *, ended: bool = False) -> None:
+        url = (self._player_tracker_hook or "").strip()
+        if not url or not names:
+            return
+        try:
+            server_label = self._display_server_label(server_key)
+        except Exception:
+            server_label = str(server_key)
+        title = f"Player Joins - {biome}" + (" (biome ended)" if ended else "")
+        listing = "\n".join(f"- {n}" for n in names)
+        if len(listing) > 3900:
+            listing = listing[:3900] + "\n..."
+        embed = {
+            "title": title,
+            "description": listing,
+            "footer": {"text": f"Server: {server_label} | {len(names)} player(s)"},
+        }
+        try:
+            self._send_executor.submit(_post_webhook, url, {"content": "", "embeds": [embed]})
+        except Exception:
+            pass
+
     def _emit_biome_event(self, uid: str, server_key: str, biome: str, *, event_type: str, ts_epoch: Optional[float] = None) -> None:
         detector     = self._get_username(uid) or uid
         server_label = self._display_server_label(server_key)
@@ -2271,8 +2431,14 @@ class MultiScopeEngine:
                     if role_id:
                         content = f"<@&{role_id}>"
             payload = {"content": content, "embeds": [embed]}
+            attempts = PRIORITY_WEBHOOK_ATTEMPTS if b in HARD_EVERYONE_BIOMES else NORMAL_WEBHOOK_ATTEMPTS
             try:
-                self._send_executor.submit(_post_webhook, url, payload)
+                self._send_executor.submit(
+                    _post_webhook, url, payload,
+                    attempts=attempts,
+                    on_fail=self._on_webhook_failed,
+                    label=f"{b} biome webhook",
+                )
             except Exception:
                 pass
             posted_any = True
@@ -2403,6 +2569,7 @@ class MultiScopeEngine:
             "[BloxstrapRPC]" in line
             or "disconnect" in lower
             or "connection lost" in lower
+            or (self._player_tracker_hook and "humanoid.clothes:" in lower)
             or any(token in lower for token in _merchant_prefilters_for_mode(self._merchant_detection_mode))
         )
         if needs_scope_order:
@@ -2535,6 +2702,12 @@ class MultiScopeEngine:
                     continue
                 if previous:
                     self._emit_biome_event(uid, server_key, previous, event_type="end", ts_epoch=event_ts)
+                    # Player tracker: flush joins buffered during a special biome.
+                    if (previous or "").upper() in PLAYER_TRACKER_DELAY_BIOMES and scope.player_join_buffer:
+                        self._send_player_tracker(server_key, (previous or "").upper(), list(scope.player_join_buffer), ended=True)
+                    scope.player_join_buffer.clear()
+                # Player tracker: new biome context -> reset per-context de-dupe.
+                scope.player_seen.clear()
                 scope.last_biome = biome
                 scope.last_biome_ts = event_ts
                 self._last_biome_post_by_scope[server_key] = event_ts
@@ -2547,6 +2720,13 @@ class MultiScopeEngine:
                         f"[MultiScope] BIOME START suppressed | biome=NORMAL | "
                         f"user={self._get_username(uid)} | server={server_key}"
                     )
+
+        # Player tracker: clothing-load-fail lines reveal player names in the server.
+        if self._player_tracker_hook and "Humanoid.Clothes:" in line:
+            try:
+                self._scan_player_joins(uid, line)
+            except Exception:
+                pass
 
         cur = self._cur.get(uid)
         if cur is not None and ts_epoch is not None:

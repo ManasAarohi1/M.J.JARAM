@@ -476,7 +476,10 @@ from log_utils import (
     find_log_match,
     get_roblox_log_index,
 )
-from biomes import biome_names, biome_meta, biome_duration
+from biomes import (
+    biome_names, biome_meta, biome_duration,
+    load_biomes_catalog, load_custom_biomes, save_custom_biome, delete_custom_biome,
+)
 from utilities_tab import (
     build_utilities_widget,
     _BlockWorker,
@@ -879,29 +882,12 @@ def _bm_relaxed() -> bool:
 
 def _bm_lock_enforced() -> bool:
     """
-    True when biome lock should be enforced (force Everyone on hard biomes).
-    Uses a double-check to avoid accidental flips during startup/path changes.
+    Whether the "hard biome" mode lock is enforced.
+
+    User override: CYBERSPACE / GLITCHED / DREAMSPACE are freely editable per
+    webhook (None / Message / Everyone), so this lock is never enforced.
     """
-    global _BM_LOCK_CONFIRMED
-    try:
-        if _bm_relaxed():
-            if _BM_LOCK_CONFIRMED:
-                _BM_LOCK_CONFIRMED = False
-            return False
-
-        if _BM_LOCK_CONFIRMED:
-            return True
-
-        # Second pass before enforcing lock to avoid flapping on transient misses.
-        if _bm_relaxed():
-            _BM_LOCK_CONFIRMED = False
-            return False
-
-        _BM_LOCK_CONFIRMED = True
-        return True
-    except Exception:
-        # Fail closed if anything unexpected happens.
-        return True
+    return False
 
 _COOKIE_ENC_PREFIX_V1 = "enc_v1:"  # legacy (unsupported; reset required)
 _COOKIE_ENC_PREFIX_V2 = "enc_v2:"  # AES-GCM (password based)
@@ -967,6 +953,7 @@ class ConfigManager:
             },
             "multiscope": {
                 "webhooks": [],   # ← NEW
+                "player_tracker_webhook": "",
                 "enable_jester": True,
                 "enable_mari": True,
                 "enable_rin": True,
@@ -1000,6 +987,7 @@ class ConfigManager:
                 "disable_manager_bad_marking": False,
                 "msedgewebview2_limiter_enabled": True,
                 "hide_discord_tabs": True,
+                "close_bootstrapper_error_popups": True,
             },
             "cap_watchdog": dict(DEFAULT_CAP_WATCHDOG_SETTINGS),
             "ui": {
@@ -1018,6 +1006,15 @@ class ConfigManager:
                 "y": 0,
                 "w": 0,
                 "h": 0,
+            },
+            "roblox_resizer": {
+                # Continuously shrink every Roblox window to width x height so it
+                # renders at that resolution -> big GPU/CPU/RAM savings. Uses
+                # SWP_NOSENDCHANGING to bypass Roblox's minimum-size clamp.
+                "enabled": False,
+                "width": 200,
+                "height": 150,
+                "interval": 3,
             },
             "cookie_encryption": {
                 "enabled": False,
@@ -1120,12 +1117,44 @@ class ConfigManager:
         
 
     def _get_config_directory(self):
-        if os.name == 'nt':  
-            appdata = os.environ.get('APPDATA')
+        if os.name == 'nt':
+            # Resolve Roaming AppData from THIS process's token, not %APPDATA%.
+            # The env var is inheritable/spoofable: a launcher or companion macro can
+            # spawn JARAM with a stale or another Windows user's APPDATA, which would
+            # make JARAM read a DIFFERENT user's config. SHGetKnownFolderPath is bound
+            # to the process token, so it can't be redirected that way. Fall back to
+            # the env var only if the API call fails.
+            appdata = self._roaming_appdata_for_token() or os.environ.get('APPDATA')
             if appdata:
                 return Path(appdata) / self.app_name
 
         return Path.home() / f".{self.app_name.lower()}"
+
+    @staticmethod
+    def _roaming_appdata_for_token() -> Optional[str]:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _GUID(ctypes.Structure):
+                _fields_ = [
+                    ("d1", wintypes.DWORD), ("d2", wintypes.WORD),
+                    ("d3", wintypes.WORD), ("d4", ctypes.c_ubyte * 8),
+                ]
+
+            # FOLDERID_RoamingAppData {3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}
+            fid = _GUID(0x3EB685DB, 0x65F9, 0x4CF6,
+                        (ctypes.c_ubyte * 8)(0xA0, 0x3A, 0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D))
+            ptr = ctypes.c_wchar_p()
+            rc = ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(fid), 0, None, ctypes.byref(ptr))
+            if rc != 0 or not ptr.value:
+                return None
+            try:
+                return str(ptr.value)
+            finally:
+                ctypes.windll.ole32.CoTaskMemFree(ptr)
+        except Exception:
+            return None
 
     def _ensure_directories(self):
         try:
@@ -1693,6 +1722,20 @@ class ConfigManager:
                 meta, users = self._split_users_payload(loaded)
                 self._users_file_cookie_meta = dict(meta) if isinstance(meta, dict) else {}
                 formatted = self._ensure_new_format(users if isinstance(users, dict) else {})
+                # Guard: a real users.json is keyed by numeric Roblox user IDs. If a
+                # foreign file (a macro/bot config keyed by words like "accounts",
+                # "webhooks", "macro_time"...) gets written to users.json, refuse it so
+                # it can't nuke the pool or spawn fake "User_<key>" accounts. Returning
+                # {} makes peek_users keep the last-good cache instead of loading garbage.
+                if formatted and not any(str(k).isdigit() for k in formatted):
+                    _logger.warning(
+                        "users.json rejected: %d entries, no numeric user IDs "
+                        "(foreign config file?): keys=%s",
+                        len(formatted), list(formatted)[:8],
+                    )
+                    self._users_file_cookie_meta = {}
+                    self._users_file_has_encrypted_cookies = False
+                    return {}
                 self._users_file_has_encrypted_cookies = self._users_data_has_encrypted_cookies(formatted)
                 return formatted
         except Exception:
@@ -2384,12 +2427,15 @@ class ConfigManager:
             with self._cache_lock:
                 if (
                     not data
-                    and size2 > 2
                     and isinstance(self._users_cache, dict)
                     and bool(self._users_cache)
                 ):
-                    self._users_cache_mtime = mtime2
-                    self._users_cache_unlock_token = unlock_token
+                    # Empty/failed read but we hold a good cache: keep it. Covers a
+                    # truncated or locked users.json (external writer / a second
+                    # instance mid os.replace) that would otherwise cache {} and let
+                    # a later save wipe every account. Don't advance mtime; re-read
+                    # next call once the file is whole again. (Clearing accounts goes
+                    # through save_users, which updates the cache directly.)
                     return self._users_cache
                 self._users_cache_mtime = mtime2
                 self._users_cache = data if isinstance(data, dict) else {}
@@ -2493,7 +2539,7 @@ class ConfigManager:
         except Exception:
             return False
 
-    def _load_settings_uncached(self) -> dict:
+    def _load_settings_uncached(self) -> Optional[dict]:
         try:
             if self.settings_file.exists():
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
@@ -2575,6 +2621,17 @@ class ConfigManager:
                 return self._apply_cookie_encryption_on_settings_load(settings)
             return self._apply_cookie_encryption_on_settings_load(copy.deepcopy(self.default_settings))
         except Exception:
+            # An EXISTING, non-trivial settings.json that fails to parse means we
+            # caught a partial/locked write (external editor, a second JARAM
+            # instance mid os.replace, AV). Do NOT fall back to defaults here --
+            # that poisons the cache, and a later save would persist defaults,
+            # wiping every webhook/biome config. Signal failure (None) so
+            # peek_settings keeps the last good copy instead.
+            try:
+                if self.settings_file.exists() and self._file_size(self.settings_file) > 2:
+                    return None
+            except Exception:
+                pass
             return self._apply_cookie_encryption_on_settings_load(copy.deepcopy(self.default_settings))
 
     def peek_settings(self) -> dict:
@@ -2596,6 +2653,14 @@ class ConfigManager:
             data = self._load_settings_uncached()
             mtime2 = self._file_mtime(self.settings_file)
             with self._cache_lock:
+                if data is None:
+                    # Read failed on an existing settings.json (partial/locked
+                    # write). Keep the last good cache instead of poisoning with
+                    # defaults. Don't advance the cached mtime, so the next call
+                    # re-reads once the writer finishes.
+                    if isinstance(self._settings_cache, dict) and self._settings_cache:
+                        return self._settings_cache
+                    data = self._apply_cookie_encryption_on_settings_load(copy.deepcopy(self.default_settings))
                 self._settings_cache_mtime = mtime2
                 self._settings_cache = data if isinstance(data, dict) else {}
                 self._settings_cache_unlock_token = unlock_token
@@ -4129,6 +4194,59 @@ class _AutoActionsMonitorDialog(QDialog):
             self.table.setUpdatesEnabled(True)
 
 
+# Fishstrap/Bloxstrap non-fatal error popups (e.g. "Connectivity error" from a
+# 403 on Roblox's version check when many alts launch at once) sit open and need
+# a manual Close. Auto-dismiss them from the monitor loop.
+_BOOTSTRAPPER_ERROR_TITLES = ("connectivity error",)
+
+
+def close_bootstrapper_error_dialogs() -> int:
+    """Close open *strap.exe error dialogs whose title matches a known popup.
+
+    Matches on BOTH the window title and a *strap.exe owning process so no
+    unrelated window is ever touched. Returns how many were closed.
+    ponytail: title allowlist, add more titles here if other popups show up.
+    """
+    try:
+        import win32con
+        import win32gui
+        import win32process
+        import psutil
+    except Exception:
+        return 0
+    closed = 0
+    pid_name_cache: dict = {}
+
+    def _cb(hwnd, _):
+        nonlocal closed
+        try:
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            title = (win32gui.GetWindowText(hwnd) or "").strip().lower()
+            if title not in _BOOTSTRAPPER_ERROR_TITLES:
+                return
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            name = pid_name_cache.get(pid)
+            if name is None:
+                try:
+                    name = psutil.Process(pid).name().lower()
+                except Exception:
+                    name = ""
+                pid_name_cache[pid] = name
+            if not name.endswith("strap.exe"):
+                return
+            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            closed += 1
+        except Exception:
+            return
+
+    try:
+        win32gui.EnumWindows(_cb, None)
+    except Exception:
+        pass
+    return closed
+
+
 class WorkerThread(QThread):
     log_signal     = Signal(str)
     status_signal  = Signal(object)
@@ -4217,6 +4335,20 @@ class WorkerThread(QThread):
             DEFAULT_CAP_WATCHDOG_SETTINGS["in_menu_none_increments_cap"]
         )
         self.cap_counter_limit = int(DEFAULT_CAP_WATCHDOG_SETTINGS["cap_counter_limit"])
+        # The launch gate serializes launches; it must NOT stall on preconnect_grace,
+        # or one slow account freezes every relaunch for 6 minutes while other
+        # accounts keep dying -> fleet count sawtooths. Move on after this instead.
+        self.launch_gate_max_block = 45
+        # Fraction of live accounts that may be missing a strict log match before we
+        # treat it as a log-map failure rather than N dead accounts.
+        self._strict_miss_mass_ratio = 0.5
+        self._last_strict_miss_ratio = 0.0
+        self._strict_miss_since = 0.0
+        self._strict_miss_max_suppress = 900  # stop suppressing after 15 min
+        # One-per-server dedup: don't cull an account still carrying a stale
+        # server label, and never cull the whole fleet in a single pass.
+        self._dedup_launch_grace = 90
+        self._dedup_max_kills_per_pass = 2
         self._waiting_usernames_since = {}  # uid -> epoch; cleaned up automatically
         self._boot_phase = True  # use initial_delay for any launches during ramp
 
@@ -4388,6 +4520,21 @@ class WorkerThread(QThread):
             # Reserve before network/auth/PID work begins.  Failed and
             # false-negative attempts must consume the same delay as success.
             self._sync_global_launch_timer(ts)
+            return True
+
+    def _launch_slot_ready_now(self) -> bool:
+        """Non-blocking check: is a launch slot available right now?
+        Used to gate queued launches without sleeping inside the worker loop."""
+        try:
+            if self._seconds_until_launch_delay_ready() > 0.0:
+                return False
+        except Exception:
+            return True
+        try:
+            if not self.launch_wait_for_log_mode:
+                return True
+            return bool(self._is_launch_gate_ready())
+        except Exception:
             return True
 
     def _clear_launch_gate(self, uid: Optional[str] = None) -> None:
@@ -4597,6 +4744,19 @@ class WorkerThread(QThread):
         except Exception:
             return False, "unhealthy"
 
+    def _verify_cached(self, pid) -> bool:
+        # Per-tick memo of verify_process_active: liveness cannot change within a
+        # single tick, so the counting/status/eligibility passes share one syscall
+        # per PID instead of 4-5. Cleared at the top of each worker tick.
+        cache = getattr(self, "_verify_tick_cache", None)
+        if cache is None:
+            cache = self._verify_tick_cache = {}
+        v = cache.get(pid)
+        if v is None:
+            v = self.process_mgr.verify_process_active(pid)
+            cache[pid] = v
+        return v
+
     def _is_user_live(self, uid: str) -> bool:
         try:
             pids = list(self.manager.process_tracker.user_processes.get(str(uid), []) or [])
@@ -4604,7 +4764,7 @@ class WorkerThread(QThread):
             pids = []
         for pid in pids:
             try:
-                if self.process_mgr.verify_process_active(pid):
+                if self._verify_cached(pid):
                     return True
             except Exception:
                 continue
@@ -4692,15 +4852,23 @@ class WorkerThread(QThread):
             self._clear_launch_gate(gate_uid)
             return True
 
-        # Hard failsafe: never let the gate block beyond preconnect_grace.
+        # Hard failsafe: never let one unconfirmed account block every other launch.
+        # Bounded by launch_gate_max_block, NOT preconnect_grace -- the stuck account
+        # still gets its full preconnect_grace from its own watchdog, but the queue
+        # keeps moving so the fleet doesn't drain while we wait.
         try:
-            grace_s = float(getattr(self, "preconnect_grace", 0) or 0)
+            grace_s = float(getattr(self, "launch_gate_max_block", 0) or 0)
         except Exception:
             grace_s = 0.0
+        if grace_s <= 0:
+            try:
+                grace_s = float(getattr(self, "preconnect_grace", 0) or 0)
+            except Exception:
+                grace_s = 0.0
         if grace_s > 0 and elapsed >= grace_s:
             self._log_launch_gate_debug(
                 f"open:failsafe:{gate_uid}",
-                f"open uid={gate_uid} reason=preconnect_grace elapsed={elapsed:.1f}s grace={grace_s:.1f}s",
+                f"open uid={gate_uid} reason=gate_max_block elapsed={elapsed:.1f}s limit={grace_s:.1f}s",
                 min_interval_s=0.0,
             )
             self._clear_launch_gate(gate_uid)
@@ -4737,6 +4905,58 @@ class WorkerThread(QThread):
             min_interval_s=1.0,
         )
         return False
+
+    def _strict_log_map_trusted(self) -> bool:
+        """False when most live accounts lost their strict log match at once.
+
+        A single account missing from the logs is a dead account. Half the fleet
+        missing at once is a log-map/scan failure, and killing on it wipes out
+        dozens of healthy sessions. Uses the previous tick's ratio so the check
+        costs nothing.
+        """
+        try:
+            limit = float(getattr(self, "_strict_miss_mass_ratio", 0.5) or 0.5)
+            ratio = float(getattr(self, "_last_strict_miss_ratio", 0.0) or 0.0)
+        except Exception:
+            return True
+        now = time.time()
+        if ratio < limit:
+            self._strict_miss_since = 0.0
+            return True
+        # Escape hatch: if the fleet really is mostly broken, suppressing kills
+        # forever would leave every account stuck instead of being recycled.
+        # Suppress only long enough to ride out a transient log-map failure.
+        since = float(getattr(self, "_strict_miss_since", 0.0) or 0.0)
+        if since <= 0.0:
+            self._strict_miss_since = now
+            since = now
+        if (now - since) >= float(getattr(self, "_strict_miss_max_suppress", 900) or 900):
+            self._log_throttled(
+                "strict_map_broken_giveup",
+                f"[Watchdog] log-map still {ratio * 100:.0f}% missing after "
+                f"{int(now - since)}s; resuming normal recycling.",
+                min_interval_s=60.0,
+            )
+            return True
+        self._log_throttled(
+            "strict_map_broken",
+            f"[Watchdog] {ratio * 100:.0f}% of live accounts missing from logs; "
+            "treating as log-map failure, not killing this tick.",
+            min_interval_s=30.0,
+        )
+        return False
+
+    def _log_throttled(self, key: str, message: str, min_interval_s: float = 30.0) -> None:
+        try:
+            seen = self._throttled_log_seen
+        except AttributeError:
+            seen = {}
+            self._throttled_log_seen = seen
+        now = time.time()
+        if now - float(seen.get(key, 0.0) or 0.0) < float(min_interval_s):
+            return
+        seen[key] = now
+        self._log(message)
 
     def _wait_for_launch_gate_ready(self) -> bool:
         if not self.launch_wait_for_log_mode:
@@ -5574,6 +5794,7 @@ class WorkerThread(QThread):
             return False
 
     def _drain_action_queue(self, max_actions: int = 8) -> None:
+        deferred = []
         for _ in range(max(1, int(max_actions or 1))):
             try:
                 action_name, args, kwargs = self._action_queue.get_nowait()
@@ -5584,6 +5805,10 @@ class WorkerThread(QThread):
                 break
 
             try:
+                if action_name in ("restart_user_session", "launch_user_session_custom") and not self._launch_slot_ready_now():
+                    # Launch pacing not satisfied yet -- defer without blocking the loop.
+                    deferred.append((action_name, args, kwargs))
+                    continue
                 if action_name == "restart_user_session":
                     self.restart_user_session(*args, **kwargs)
                 elif action_name == "launch_user_session_custom":
@@ -5603,6 +5828,11 @@ class WorkerThread(QThread):
                     self._action_queue.task_done()
                 except Exception:
                     pass
+        for _item in deferred:
+            try:
+                self._action_queue.put(_item)
+            except Exception:
+                pass
 
     def _trace(self, uid: str, msg: str, *, every: float = 30.0) -> None:
         now = time.time()
@@ -5888,12 +6118,24 @@ class WorkerThread(QThread):
         server_label = self._compute_server_label_gui(info)
         is_public = server_label.startswith("Public:")
 
+        # user_server is a sticky label map: an account that died keeps its last
+        # server label until something explicitly pops it, and several kill paths
+        # never do. Treating those ghosts as occupants blocks every other account
+        # on that server forever -- they get backed off, retry, collide with the
+        # same dead uid, and never open again. Only a uid with a live process can
+        # actually occupy a server.
+        def _occupies(other_uid: str) -> bool:
+            try:
+                return self._is_user_live(other_uid)
+            except Exception:
+                return True
+
         # 1) Live occupant check
         if not is_public:
             for other_uid, other_label in (self.manager.process_tracker.user_server or {}).items():
                 if other_uid == uid or not other_label:
                     continue
-                if other_label == server_label:
+                if other_label == server_label and _occupies(other_uid):
                     return True, server_label, other_uid
 
         # 2) Reservation check (blocks races during handoffs)
@@ -5912,7 +6154,7 @@ class WorkerThread(QThread):
                 if other_uid == uid:
                     continue
                 o_name = (self.manager.settings.get(other_uid, {}).get("username") or "").strip().lower()
-                if o_name and o_name == owner_lc:
+                if o_name and o_name == owner_lc and _occupies(other_uid):
                     return True, server_label, other_uid
 
         return False, server_label, ""
@@ -6062,6 +6304,7 @@ class WorkerThread(QThread):
                     ocr_cfg.get("skip_webhook_unknown_context", False),
                 )
             ),
+            player_tracker_hook=ms_cfg.get("player_tracker_webhook", ""),
             in_menu_none_timeout_seconds=cap_watchdog_cfg["in_menu_none_timeout_seconds"],
         )
 
@@ -6273,6 +6516,15 @@ class WorkerThread(QThread):
             # Push the settings loaded before MultiScope startup.
             self._apply_multiscope_webhook_settings(cfg)
 
+            # ↓↓↓ ensure spares_mode, delays, and pools are live before first launch
+            self.apply_new_settings(cfg)
+            # Seed the settings-mtime watcher so the tick only re-applies on a
+            # *later* external change, not redundantly on the first pass.
+            try:
+                self._settings_mtime_seen = float(self.cfg_manager.get_settings_mtime())
+            except Exception:
+                self._settings_mtime_seen = None
+
             if resume_state:
                 try:
                     ms_state = resume_state.get("multiscope_state") or {}
@@ -6322,8 +6574,16 @@ class WorkerThread(QThread):
         if not isinstance(misc_cfg, dict):
             misc_cfg = {}
         self.launch_wait_for_log_mode = bool(misc_cfg.get("log_confirmed_launch_mode", False))
+        # OPT-IN live settings reload. Default OFF: when on, the worker re-reads
+        # settings.json every tick on change, which raised the odds of catching a
+        # partial/locked external write. Leave off unless you edit settings.json
+        # from outside JARAM and want it applied without a restart.
+        self._live_settings_reload_enabled = bool(misc_cfg.get("live_settings_reload", False))
         self.msedgewebview2_limiter_enabled = bool(
             misc_cfg.get("msedgewebview2_limiter_enabled", True)
+        )
+        self.close_bootstrapper_error_popups = bool(
+            misc_cfg.get("close_bootstrapper_error_popups", True)
         )
         if not self.launch_wait_for_log_mode:
             self._clear_launch_gate()
@@ -6495,7 +6755,7 @@ class WorkerThread(QThread):
             self._log(f"[ManualRestart] skipped uid={user_id}: manager not ready or user missing")
             return False
         try:
-            if not self._wait_for_launch_slot_ready(f"manual restart uid={user_id}"):
+            if not self._launch_slot_ready_now():
                 return False
             self._log(f"[ManualRestart] uid={user_id} closing current Roblox process and relaunching")
             # cancel in-flight mapping on manual restart
@@ -6534,7 +6794,7 @@ class WorkerThread(QThread):
         if not self.manager or user_id not in self.user_states:
             return False
         try:
-            if not self._wait_for_launch_slot_ready(f"manual launch uid={user_id}"):
+            if not self._launch_slot_ready_now():
                 return False
             # cancel in-flight mapping on manual launch
             self.handoff_for.pop(user_id, None)
@@ -6757,6 +7017,27 @@ class WorkerThread(QThread):
                     # users and their metadata after users.json hot reloads.
                     self._sync_multiscope_user_list()
 
+                # ---- Hot reload settings.json (webhooks, delays, spares, etc.) ----
+                # OPT-IN via misc.live_settings_reload (default OFF). When on, an
+                # external edit to settings.json is applied live instead of only at
+                # startup or on a GUI save. Off by default because reading
+                # settings.json every tick raised the odds of catching a partial or
+                # locked external write, which could poison config state.
+                if getattr(self, "_live_settings_reload_enabled", False):
+                    try:
+                        settings_mtime = float(self.cfg_manager.get_settings_mtime())
+                    except Exception:
+                        settings_mtime = 0.0
+                    if getattr(self, "_settings_mtime_seen", None) != settings_mtime:
+                        self._settings_mtime_seen = settings_mtime
+                        try:
+                            fresh_cfg = self.cfg_manager.load_settings() or {}
+                            if fresh_cfg:
+                                self.apply_new_settings(fresh_cfg)
+                                self._log("[Settings] external change detected; reloaded live.")
+                        except Exception as _e:
+                            self._log(f"[Settings] hot-reload error: {_e!r}")
+
                 # housekeeping: clean dead processes
                 if 'cleanup' not in self.timing_trackers:
                     self.timing_trackers['cleanup'] = 0
@@ -6770,6 +7051,12 @@ class WorkerThread(QThread):
                         self.process_mgr.cleanup_dead_processes(self.manager.process_tracker)
                     except Exception as e:
                         self._log(f"[Cleanup] error: {e!r}")
+                    try:
+                        self.process_mgr.eliminate_orphaned_processes(
+                            self.manager.process_tracker, set(self.manager.settings.keys())
+                        )
+                    except Exception as e:
+                        self._log(f"[Cleanup] orphan sweep error: {e!r}")
                     try:
                         limit_roblox_crash_handlers(threshold=2, kill_all=False)
                     except Exception:
@@ -6791,6 +7078,14 @@ class WorkerThread(QThread):
                                 self.process_mgr.terminate_process(pid, self.manager.process_tracker)
                     except Exception as e:
                         self._log(f"[WindowCheck] error: {e!r}")
+                    # Auto-dismiss Fishstrap/Bloxstrap "Connectivity error" (403) popups.
+                    if getattr(self, "close_bootstrapper_error_popups", True):
+                        try:
+                            n_closed = close_bootstrapper_error_dialogs()
+                            if n_closed:
+                                self._log(f"[Popup] closed {n_closed} bootstrapper error dialog(s).")
+                        except Exception as e:
+                            self._log(f"[Popup] error: {e!r}")
                     self.timing_trackers['window'] = now
                 
                 # After housekeeping, before relaunch logic
@@ -6828,10 +7123,14 @@ class WorkerThread(QThread):
                 except Exception as _e:
                     self._log(f"[Sync] flag sync error: {_e}")
 
+                # Reset per-tick liveness cache: verify each PID once this tick
+                # instead of 4-5x across the counting/status/eligibility passes.
+                self._verify_tick_cache = {}
+
                 # Count live processes and guard against stalls
                 active_processes = sum(
                     len([pid for pid in self.manager.process_tracker.user_processes.get(uid, [])
-                        if self.process_mgr.verify_process_active(pid)])
+                        if self._verify_cached(pid)])
                     for uid in list(self.manager.settings.keys())
                 )
                 total_users = len(self.manager.settings)
@@ -6929,7 +7228,7 @@ class WorkerThread(QThread):
                         server_owner = ""
 
                     live = [pid for pid in self.manager.process_tracker.user_processes.get(uid, [])
-                            if self.process_mgr.verify_process_active(pid)]
+                            if self._verify_cached(pid)]
                     live_by_uid[uid] = bool(live)
                     if live:
                         try:
@@ -7057,7 +7356,7 @@ class WorkerThread(QThread):
                     if self.spares_mode and uid in self.handoff_for:
                         spare_uid = self.handoff_for[uid]
                         spare_live = any(
-                            self.process_mgr.verify_process_active(pid)
+                            self._verify_cached(pid)
                             for pid in self.manager.process_tracker.user_processes.get(spare_uid, [])
                         )
                         if spare_live:
@@ -7116,6 +7415,19 @@ class WorkerThread(QThread):
                         "server_owner": server_owner,
                         "antiafk_last_action_at": antiafk_last_action_at,
                     }
+
+                # Track how much of the live fleet is missing a strict log match.
+                # _strict_log_map_trusted() reads this next tick to tell a dead
+                # account apart from a log-map wide failure.
+                try:
+                    live_uids = [u for u, alive in live_by_uid.items() if alive]
+                    if live_uids:
+                        missed = sum(1 for u in live_uids if not strict_log_matches.get(u, False))
+                        self._last_strict_miss_ratio = missed / float(len(live_uids))
+                    else:
+                        self._last_strict_miss_ratio = 0.0
+                except Exception:
+                    self._last_strict_miss_ratio = 0.0
 
                 # MultiScope uses the newest live process creation time to
                 # reject disconnect lines left behind by an older launch.
@@ -7260,6 +7572,31 @@ class WorkerThread(QThread):
                                 st["requires_restart"] = not cap_triggered
                                 st["inactive_since"]   = None
                                 st["status"]           = "Offline"
+                            elif kind == "webhook_failed":
+                                # Engine exhausted retries on a biome webhook send.
+                                # Post an error embed to the CAP/alert webhook so
+                                # the failure is visible (the failing hook itself
+                                # can't reliably report its own outage).
+                                try:
+                                    settings = self.cfg_manager.peek_settings() or {}
+                                except Exception:
+                                    settings = {}
+                                alert_url = self.cfg_manager._resolve_alert_webhook_url(settings)
+                                if alert_url:
+                                    embed = {
+                                        "title": "Webhook Delivery Failed",
+                                        "description": str(payload or "A biome webhook could not be delivered after retries."),
+                                        "color": 15158332,
+                                    }
+                                    def _post_alert(u=alert_url, e=embed):
+                                        try:
+                                            requests.post(u, json={"embeds": [e]}, timeout=8)
+                                        except Exception:
+                                            pass
+                                    try:
+                                        threading.Thread(target=_post_alert, daemon=True).start()
+                                    except Exception:
+                                        _post_alert()
                         rows = self.ms.snapshot()            # [{server, users, biome/merchant…}]
                         has_signal = False
                         try:
@@ -7308,7 +7645,7 @@ class WorkerThread(QThread):
                 proc_info = {}
                 for uid, pids in list(self.manager.process_tracker.user_processes.items()):
                     for pid in list(pids):  # snapshot the list in case it changes
-                        if not self.process_mgr.verify_process_active(pid):
+                        if not self._verify_cached(pid):
                             continue
                         created = datetime.fromtimestamp(
                             self.manager.process_tracker.creation_timestamps.get(pid, time.time())
@@ -7321,7 +7658,8 @@ class WorkerThread(QThread):
                 try:
                     restartables = [
                         u for u, s in list(self.user_states.items())
-                        if s.get("requires_restart")
+                        if isinstance(s, dict) and isinstance(s.get("user_info"), dict)
+                        and s.get("requires_restart")
                         and not (s["user_info"].get("bad", False) or s["user_info"].get("cap", False))
                         and not s["user_info"].get("disabled", False)
                         and u not in self.handoff_for
@@ -7334,11 +7672,20 @@ class WorkerThread(QThread):
                         info = st.get("user_info", {})
                         if now < self._skip_until_by_user.get(u, 0):
                             return False
-                        # per-user launch delay (boot uses initial_delay)
-                        gate = self.initial_delay if self._boot_phase else self.manager.timeouts["launch_delay"]
-                        if now - st.get("last_launch", 0) < gate:
+                        # Never relaunch an account that already has a live process
+                        # (root cause of double / duplicate launching).
+                        if self._is_user_live(u):
                             return False
-                        return True 
+                        # Give a freshly launched account time to spawn and register its
+                        # PID before it is eligible again. Roblox's spawn time can exceed
+                        # launch_delay, leaving a window where the process is neither
+                        # "live" nor past the short cooldown -- which let the same uid be
+                        # launched twice.
+                        gate = self.initial_delay if self._boot_phase else self.manager.timeouts["launch_delay"]
+                        spawn_grace = max(gate, self.restart_threshold + 15)
+                        if now - st.get("last_launch", 0) < spawn_grace:
+                            return False
+                        return True
 
                     restartables = [u for u in restartables if _eligible_now(u)]
 
@@ -7376,6 +7723,30 @@ class WorkerThread(QThread):
                     # block the relaunch queue entirely until ramp finishes
                     if self._boot_phase:
                         ordered = []
+
+                    # Hard ceiling: never run more live accounts than we have accounts
+                    # able to run. Compare USERS to USERS -- comparing raw process count
+                    # to user count means one account holding two tracked PIDs (a
+                    # duplicate, or a stray helper process tracked under the uid) inflates
+                    # the total and silently disables relaunches forever, so offline
+                    # accounts never come back.
+                    if ordered:
+                        try:
+                            live_user_count = sum(1 for alive in live_by_uid.values() if alive)
+                            launchable_user_count = sum(
+                                1
+                                for s in self.user_states.values()
+                                if isinstance(s, dict)
+                                and isinstance(s.get("user_info"), dict)
+                                and not s["user_info"].get("bad", False)
+                                and not s["user_info"].get("cap", False)
+                                and not s["user_info"].get("disabled", False)
+                            )
+                        except Exception:
+                            live_user_count = active_processes
+                            launchable_user_count = total_users
+                        if live_user_count >= max(1, launchable_user_count):
+                            ordered = []
 
                     if ordered and (now - self.timing_trackers['relaunch']) >= _global_gate:
                         launched = False
@@ -7423,7 +7794,7 @@ class WorkerThread(QThread):
                                 launched = True
                                 break
                             else:
-                                # Launch failed for some other reason — short backoff on this uid
+                                # Launch failed for some other reason, short backoff on this uid
                                 self._skip_until_by_user[uid] = now + 10
                                 # The failed attempt still consumed the global slot.
                                 break
@@ -7496,6 +7867,7 @@ class WorkerThread(QThread):
             return min(times) if times else float('inf')
 
         # Choose keeper per label by priority, then terminate extras
+        dedup_budget = int(self._dedup_max_kills_per_pass)
         for label, uids in by_label.items():
             if len(uids) <= 1:
                 continue
@@ -7512,10 +7884,34 @@ class WorkerThread(QThread):
             for uid in uids:
                 if uid == keep or uid in protected:
                     continue
+                # A just-launched account still carries whatever label it had
+                # before, or none at all. Culling it here kills a healthy session
+                # over a stale label, and it relaunches straight back into the
+                # same collision -- a churn loop that shows up as the fleet count
+                # oscillating. Let it settle first.
+                st = self.user_states.get(uid, {}) if isinstance(self.user_states, dict) else {}
+                try:
+                    since_launch = now - float(st.get("last_launch", 0) or 0)
+                except Exception:
+                    since_launch = float("inf")
+                if since_launch < self._dedup_launch_grace:
+                    continue
+                if dedup_budget <= 0:
+                    self._log_throttled(
+                        "dedup_capped",
+                        f"[DEDUP] hit per-pass cap ({self._dedup_max_kills_per_pass}); "
+                        "deferring remaining duplicates to the next tick.",
+                        min_interval_s=30.0,
+                    )
+                    return
+                killed_any = False
                 for pid in p.user_processes.get(uid, []):
                     if self.process_mgr.verify_process_active(pid):
                         self.process_mgr.terminate_process(pid, p)
                         self._log(f"[DEDUP] Killed extra instance pid={pid} uid={uid} on {label}")
+                        killed_any = True
+                if killed_any:
+                    dedup_budget -= 1
 
     def _reserve_server(self, label: str, uid: str, purpose: str = "handoff"):
         """Mark a server label as reserved for a short window (prevents normal launches)."""
@@ -7615,6 +8011,7 @@ class UserManagementDialogLegacy(QDialog):
             "misc.disable_manager_bad_marking": "Disable Manager BAD Marking",
             "misc.msedgewebview2_limiter_enabled": "Enable msedgewebview2 Limiter",
             "misc.hide_discord_tabs": "Hide Discord Tab",
+            "misc.close_bootstrapper_error_popups": "Auto-Close Bootstrapper Error Popups",
             "multiscope.merchant_webhook": "Merchant Webhook URL",
             "multiscope.merchant_detection_mode": "Merchant Detection Mode",
             "multiscope.enable_jester": "Enable Jester Pings",
@@ -10334,7 +10731,7 @@ class BorderRing(QWidget):
         super().__init__(parent)
         self.setFixedSize(diameter, diameter)
 
-        # NEW — tell Qt to honour the stylesheet even with a transparent bg
+        # NEW, tell Qt to honour the stylesheet even with a transparent bg
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -10749,6 +11146,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             "misc.disable_manager_bad_marking": "Disable Manager BAD Marking",
             "misc.msedgewebview2_limiter_enabled": "Enable msedgewebview2 Limiter",
             "misc.hide_discord_tabs": "Hide Discord Tab",
+            "misc.close_bootstrapper_error_popups": "Auto-Close Bootstrapper Error Popups",
             "multiscope.merchant_webhook": "Merchant Webhook URL",
             "multiscope.merchant_detection_mode": "Merchant Detection Mode",
             "multiscope.enable_jester": "Enable Jester Pings",
@@ -10967,7 +11365,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
 
     def setup_ui(self):
-        self.setWindowTitle("J.JARAM - Jirach1's Just Another Roblox Account Manager")
+        self.setWindowTitle("M.J.JARAM - Jirach1's Just Another Roblox Account Manager")
         self.setGeometry(100, 100, 1100, 720)
 
         icon_path = _get_icon_path()
@@ -10980,7 +11378,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         header_layout = QHBoxLayout()
 
-        title_label = QLabel("J.JARAM - Jirach1's Just Another Roblox Account Manager")
+        title_label = QLabel("M.J.JARAM - Jirach1's Just Another Roblox Account Manager")
         title_font = QFont()
         title_font.setPointSize(18)
         title_font.setBold(True)
@@ -11129,11 +11527,32 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         multi_instance_action.setToolTip("Allow multiple Roblox Player instances to run at the same time")
         multi_instance_action.triggered.connect(self.show_multi_instance_window)
 
+        heap_action = extras_menu.addAction("Raise Instance Limit (Desktop Heap)")
+        heap_action.setToolTip(
+            "Raise the Windows interactive desktop heap so more than ~15 Roblox windows "
+            "can run at once. Sets SharedSection to 128 MB. Needs admin + a reboot."
+        )
+        heap_action.triggered.connect(self._apply_desktop_heap)
+
         ram_export_action = extras_menu.addAction("RAM Export")
         ram_export_action.triggered.connect(self.show_ram_export_window)
 
         utilities_action = extras_menu.addAction("Utilities")
         utilities_action.triggered.connect(self.show_utilities_window)
+
+        extras_menu.addSeparator()
+        self._merchant_fix_action = extras_menu.addAction("Merchant Fix (Block assetdelivery)")
+        self._merchant_fix_action.setCheckable(True)
+        self._merchant_fix_action.setToolTip(
+            "Null-route assetdelivery.roblox.com via the hosts file and clear the "
+            "Roblox asset cache. Requires running as Administrator."
+        )
+        try:
+            import merchant_fix as _merchant_fix
+            self._merchant_fix_action.setChecked(bool(_merchant_fix.is_enabled()))
+        except Exception:
+            pass
+        self._merchant_fix_action.triggered.connect(self._toggle_merchant_fix)
 
         log_cleanup_action = extras_menu.addAction("Roblox Log Cleanup")
         log_cleanup_action.setToolTip("Delete Roblox log files after they have been inactive for a configured time")
@@ -11160,6 +11579,149 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         except Exception:
             show_tutorial = False
         self._apply_tutorial_menu_visibility(show_tutorial)
+
+    def _toggle_merchant_fix(self, checked: bool) -> None:
+        try:
+            import merchant_fix
+        except Exception as e:
+            QMessageBox.critical(self, "Merchant Fix", f"merchant_fix module not available: {e}")
+            return
+        act = getattr(self, "_merchant_fix_action", None)
+        if checked:
+            reply = QMessageBox.question(
+                self,
+                "Enable Merchant Fix",
+                "This will:\n\n"
+                "  - Add '255.255.255.0 assetdelivery.roblox.com' to your hosts file\n"
+                "    (blocks Roblox asset delivery)\n"
+                "  - Delete the Roblox asset cache (rbx-storage.*) in %LOCALAPPDATA%\\Roblox\n\n"
+                "Requires running as Administrator. Close Roblox first.\n\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                if act:
+                    act.setChecked(False)
+                return
+            try:
+                merchant_fix.enable_hosts()
+            except PermissionError:
+                QMessageBox.critical(self, "Merchant Fix", "Could not edit the hosts file.\nRun as Administrator and try again.")
+                if act:
+                    act.setChecked(False)
+                return
+            except Exception as e:
+                QMessageBox.critical(self, "Merchant Fix", f"Failed to update hosts file: {e}")
+                if act:
+                    act.setChecked(False)
+                return
+            deleted, errors = merchant_fix.clear_roblox_cache()
+            msg = f"Merchant Fix enabled.\n\nHosts entry added.\nCleared {deleted} cache file(s)."
+            if errors:
+                msg += (
+                    f"\n\n{len(errors)} file(s) could not be deleted "
+                    "(Roblox may be running - close it and toggle again):\n"
+                    + "\n".join(errors[:5])
+                )
+            QMessageBox.information(self, "Merchant Fix", msg)
+            try:
+                self.add_log(f"[MerchantFix] Enabled: assetdelivery blocked, cleared {deleted} cache file(s).")
+            except Exception:
+                pass
+        else:
+            try:
+                changed = merchant_fix.disable_hosts()
+            except PermissionError:
+                QMessageBox.critical(self, "Merchant Fix", "Could not edit the hosts file.\nRun as Administrator and try again.")
+                if act:
+                    act.setChecked(True)
+                return
+            except Exception as e:
+                QMessageBox.critical(self, "Merchant Fix", f"Failed to update hosts file: {e}")
+                if act:
+                    act.setChecked(True)
+                return
+            QMessageBox.information(
+                self, "Merchant Fix",
+                "Merchant Fix disabled.\nHosts entry removed." if changed else "Merchant Fix was not enabled.",
+            )
+            try:
+                self.add_log("[MerchantFix] Disabled: hosts entry removed.")
+            except Exception:
+                pass
+
+    def _apply_desktop_heap(self, target_kb: int = 131072) -> None:
+        """Raise the Windows interactive desktop heap (SharedSection middle value)
+        so >~15 Roblox windows can run at once. Writes a boot-critical HKLM key,
+        so: back up the original, only touch the middle number, write elevated
+        (UAC), and require a reboot. 131072 KB = 128 MB.
+        """
+        import re as _re
+        SUBSYS = r"SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems"
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, SUBSYS) as k:
+                cur, vtype = winreg.QueryValueEx(k, "Windows")
+        except Exception as e:
+            QMessageBox.warning(self, "Raise Instance Limit", f"Couldn't read the registry value:\n{e}")
+            return
+
+        m = _re.search(r"SharedSection=(\d+),(\d+),(\d+)", str(cur))
+        if not m:
+            QMessageBox.warning(
+                self, "Raise Instance Limit",
+                "Couldn't find SharedSection in the SubSystems value; not touching it.")
+            return
+        cur_mid = int(m.group(2))
+        if cur_mid >= target_kb:
+            QMessageBox.information(
+                self, "Raise Instance Limit",
+                f"Desktop heap is already {cur_mid} KB (>= {target_kb}). Nothing to do.")
+            return
+
+        new_value = cur[:m.start(2)] + str(target_kb) + cur[m.end(2):]
+
+        try:
+            bpath = Path("desktop_heap_backup.txt")
+            with open(bpath, "a", encoding="utf-8") as f:
+                # Back up the ORIGINAL string, timestamped, before changing anything boot-critical.
+                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{cur}\n\n")
+        except Exception:
+            bpath = None
+
+        ok = QMessageBox.question(
+            self, "Raise Instance Limit",
+            f"Change interactive desktop heap {cur_mid} KB -> {target_kb} KB (128 MB)?\n\n"
+            "• Clears the ~15-window cap; new limit becomes your RAM.\n"
+            "• Needs Administrator (a UAC prompt will appear).\n"
+            "• Takes effect only after a REBOOT.\n"
+            f"{'• Original backed up to ' + str(bpath) if bpath else ''}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ok != QMessageBox.StandardButton.Yes:
+            return
+
+        # Write elevated via reg.exe (REG_EXPAND_SZ). ShellExecute 'runas' → UAC.
+        params = (
+            f'add "HKLM\\{SUBSYS}" /v Windows /t REG_EXPAND_SZ /d "{new_value}" /f'
+        )
+        try:
+            import ctypes
+            rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", "reg.exe", params, None, 0)
+        except Exception as e:
+            QMessageBox.warning(self, "Raise Instance Limit", f"Couldn't launch the elevated write:\n{e}")
+            return
+        if int(rc) <= 32:
+            QMessageBox.warning(
+                self, "Raise Instance Limit",
+                f"Elevated write was cancelled or failed (code {rc}). Nothing changed.")
+            return
+
+        self.add_log(f"[Extras] Desktop heap set to {target_kb} KB (was {cur_mid}); reboot required.")
+        QMessageBox.information(
+            self, "Raise Instance Limit",
+            f"Applied: desktop heap {target_kb} KB.\n\nReboot for it to take effect. "
+            "After reboot your instance ceiling is RAM, not the ~15 heap limit.")
 
     def show_multi_instance_window(self) -> None:
         """Show the Extras dialog used to control Roblox's singleton guard."""
@@ -11192,7 +11754,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         layout.addWidget(title)
 
         description = QLabel(
-            "J.JARAM keeps Roblox's singleton guard active so multiple accounts can run at once. "
+            "M.J.JARAM keeps Roblox's singleton guard active so multiple accounts can run at once. "
             "If Roblox was opened before the guard was ready, use Fix to close those sessions "
             "and recreate the guard cleanly."
         )
@@ -11378,7 +11940,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         if error_code == 6:
             return "An existing Roblox process owns ROBLOX_singletonEvent."
         if error_code == 5:
-            return "Windows denied access to the Roblox singleton guard. Try running J.JARAM as administrator."
+            return "Windows denied access to the Roblox singleton guard. Try running M.J.JARAM as administrator."
         if error_code:
             return f"Windows could not create the Roblox singleton guard (error {error_code})."
         return "The Roblox singleton guard could not be created."
@@ -11554,7 +12116,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         if not self._multi_instance_guard_active:
             self._multi_instance_needs_repair = True
             if not self._multi_instance_last_error:
-                self._multi_instance_last_error = "The active Roblox session does not have J.JARAM's guard."
+                self._multi_instance_last_error = "The active Roblox session does not have M.J.JARAM's guard."
             self._prompt_multi_instance_repair()
 
     def _prompt_multi_instance_repair(self) -> None:
@@ -12771,6 +13333,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         title_row.addStretch()
         disable_selected_btn = QPushButton("Disable Select")
         disable_selected_btn.clicked.connect(lambda: self.disable_selected_users(self.accounts_list))
+        delete_selected_btn = QPushButton("Delete Select")
+        delete_selected_btn.clicked.connect(lambda: self.delete_selected_accounts(self.accounts_list))
         toggle_selected_btn = QPushButton("Toggle Status")
         toggle_selected_btn.clicked.connect(lambda: self.toggle_selected_users_status(self.accounts_list))
         clear_flags_widget = QWidget()
@@ -12801,10 +13365,17 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         clear_sel_bad_btn = QPushButton("Clear Select Flag")
         clear_sel_bad_btn.clicked.connect(self._clear_selected_bad_flags)
         title_row.addWidget(disable_selected_btn, 0, Qt.AlignmentFlag.AlignTop)
+        title_row.addWidget(delete_selected_btn, 0, Qt.AlignmentFlag.AlignTop)
         title_row.addWidget(toggle_selected_btn, 0, Qt.AlignmentFlag.AlignTop)
         title_row.addWidget(clear_flags_widget, 0, Qt.AlignmentFlag.AlignTop)
         title_row.addWidget(clear_sel_bad_btn, 0, Qt.AlignmentFlag.AlignTop)
         list_layout.addLayout(title_row)
+
+        self.accounts_search_input = QLineEdit()
+        self.accounts_search_input.setPlaceholderText("Search accounts by User ID or username...")
+        self.accounts_search_input.setClearButtonEnabled(True)
+        self.accounts_search_input.textChanged.connect(lambda _t: self.refresh_accounts_list())
+        list_layout.addWidget(self.accounts_search_input)
 
         self.accounts_list = QTableWidget()
         self.accounts_list.setColumnCount(6)
@@ -16709,7 +17280,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                     "Try:\n"
                     "- Windowed/borderless mode (avoid exclusive fullscreen)\n"
                     "- Ensure the window is not minimized\n"
-                    "- Try running J.JARAM as Administrator\n\n"
+                    "- Try running M.J.JARAM as Administrator\n\n"
                     "Use hover-based capture instead?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 )
@@ -25117,6 +25688,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         if hasattr(self, "ms_merchant_webhook_input"):
             ms["merchant_webhook"] = self.ms_merchant_webhook_input.text().strip()
+        if hasattr(self, "ms_player_tracker_input"):
+            ms["player_tracker_webhook"] = self.ms_player_tracker_input.text().strip()
         if hasattr(self, "ms_enable_jester"):
             ms["enable_jester"] = bool(self.ms_enable_jester.isChecked())
         if hasattr(self, "ms_enable_mari"):
@@ -25757,7 +26330,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         self.rbwin_geom_enforce_chk = QCheckBox("Auto-fix Roblox window size/position on launch")
         self.rbwin_geom_enforce_chk.setToolTip(
-            "When enabled, each Roblox window launched by J.JARAM is checked for the recorded geometry.\n"
+            "When enabled, each Roblox window launched by M.J.JARAM is checked for the recorded geometry.\n"
             "If moving/resizing fails, it automatically retries once after 5 seconds."
         )
         win_geom_layout.addWidget(self.rbwin_geom_enforce_chk)
@@ -25779,6 +26352,27 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         win_geom_layout.addWidget(self.rbwin_geom_status_lbl)
 
         content_layout.addWidget(win_geom_group)
+
+        # ── Roblox Resizer (optimize GPU/CPU/RAM) ────────────────────────────────
+        resizer_group = QGroupBox("Roblox Resizer (optimize)")
+        resizer_layout = QFormLayout(resizer_group)
+        self.resizer_enable_chk = QCheckBox("Shrink all Roblox windows to save GPU / CPU / RAM")
+        self.resizer_enable_chk.setToolTip(
+            "Continuously resizes every Roblox window to the pixel size below.\n"
+            "Bypasses Roblox's minimum-size clamp so it truly renders tiny -> large\n"
+            "GPU/CPU/RAM savings. Detection is log-based, so tiny windows are fine."
+        )
+        resizer_layout.addRow(self.resizer_enable_chk)
+        self.resizer_width_input = QSpinBox(); self.resizer_width_input.setRange(1, 4096); self.resizer_width_input.setSuffix(" px")
+        self.resizer_width_input.setToolTip("Render width. Smaller = less GPU/CPU/RAM.")
+        resizer_layout.addRow("Width:", self.resizer_width_input)
+        self.resizer_height_input = QSpinBox(); self.resizer_height_input.setRange(1, 4096); self.resizer_height_input.setSuffix(" px")
+        self.resizer_height_input.setToolTip("Render height. Smaller = less GPU/CPU/RAM.")
+        resizer_layout.addRow("Height:", self.resizer_height_input)
+        self.resizer_enable_chk.toggled.connect(self._on_resizer_settings_changed)
+        self.resizer_width_input.valueChanged.connect(self._on_resizer_settings_changed)
+        self.resizer_height_input.valueChanged.connect(self._on_resizer_settings_changed)
+        content_layout.addWidget(resizer_group)
 
         timing_group = QGroupBox("Timing Settings"); timing_layout = QFormLayout(timing_group)
         self.settings_offline_threshold_input = QSpinBox(); self.settings_offline_threshold_input.setRange(10, 120); self.settings_offline_threshold_input.setSuffix(" s")
@@ -25876,7 +26470,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         alerts_layout.addRow("Blackout Ping:", self.blackout_ping_input)
 
         self.cap_msg_input = QLineEdit()
-        self.cap_msg_input.setPlaceholderText("This message is sent whenever a user is marked for captcha. Leave this empty if not interested. — Supports {username} and {uid}")
+        self.cap_msg_input.setPlaceholderText("This message is sent whenever a user is marked for captcha. Leave this empty if not interested., Supports {username} and {uid}")
         self.cap_msg_input.setToolTip("Sent when a user is marked CAP. Example Message: User {username} has disconnected, User ID = {uid}.")
         alerts_layout.addRow("CAP Ping:", self.cap_msg_input)
         self.cap_msg_input.setPlaceholderText("Sent when a user is marked CAP. Supports {username}, and {uid},")
@@ -25980,6 +26574,12 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         )
         self.misc_msedgewebview2_limiter_enabled_chk.setChecked(True)
         misc_layout.addRow(self.misc_msedgewebview2_limiter_enabled_chk)
+        self.misc_close_bootstrapper_error_popups_chk = QCheckBox("Auto-close Fishstrap/Bloxstrap error popups")
+        self.misc_close_bootstrapper_error_popups_chk.setToolTip(
+            "Automatically dismiss the bootstrapper's \"Connectivity error\" (403) popup so launches aren't left waiting on it."
+        )
+        self.misc_close_bootstrapper_error_popups_chk.setChecked(True)
+        misc_layout.addRow(self.misc_close_bootstrapper_error_popups_chk)
         content_layout.addWidget(misc_box)
 
         launch_priority_group = QGroupBox("Launch Priority")
@@ -26132,10 +26732,11 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         rem_btn = QPushButton("Remove Selected")
         route_btn = QPushButton("Assign Users...")
         cols_btn = QPushButton("Biome Columns...")
+        custom_biomes_btn = QPushButton("Custom Biomes...")
         role_ping_btn = QPushButton("Role ID Pings...")
         test_webhook_btn = QPushButton("Test Webhook")
         test_webhook_btn.clicked.connect(self.test_selected_webhook)
-        btn_row.addWidget(add_btn); btn_row.addWidget(rem_btn); btn_row.addWidget(route_btn); btn_row.addWidget(cols_btn); btn_row.addWidget(role_ping_btn); btn_row.addWidget(test_webhook_btn); btn_row.addStretch()
+        btn_row.addWidget(add_btn); btn_row.addWidget(rem_btn); btn_row.addWidget(route_btn); btn_row.addWidget(cols_btn); btn_row.addWidget(custom_biomes_btn); btn_row.addWidget(role_ping_btn); btn_row.addWidget(test_webhook_btn); btn_row.addStretch()
         webhooks_v.addLayout(btn_row)
 
         MODE_ITEMS = ("None", "Message", "Everyone")  # tri-mode per biome cell
@@ -26408,7 +27009,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 }
                 for uid, info in (users_cfg.items() if isinstance(users_cfg, dict) else [])
             ]
-            user_choices.sort(key=lambda u: u["username"].lower())
+            # No sort: keep users.json insertion order so this list matches the
+            # Accounts tab row order (which also iterates users_config as-is).
             # Deduplicate by canonicalized id (strip spaces) in case upstream data has duplicates/whitespace
             uniq = []
             seen_ids = set()
@@ -26897,7 +27499,133 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         add_btn.clicked.connect(lambda: add_webhook_row("", ""))
         rem_btn.clicked.connect(remove_selected_rows)
         route_btn.clicked.connect(_open_webhook_user_dialog)
+        def _rebuild_biome_columns():
+            """Re-sync the webhook table with the (re-loaded) biome catalog, keeping rows."""
+            saved = self._collect_webhooks_from_ui()
+            hidden = set(getattr(self, "_webhooks_hidden_biomes", set()) or set())
+
+            load_biomes_catalog()
+            GUI_BIOME_NAMES[:] = [b for b in biome_names() if str(b).upper() != "NORMAL"]
+
+            self.webhooks_table.setColumnCount(2 + len(GUI_BIOME_NAMES))
+            self.webhooks_table.setHorizontalHeaderLabels(["Name", "Webhook URL"] + GUI_BIOME_NAMES)
+            for c in range(2, 2 + len(GUI_BIOME_NAMES)):
+                header.setSectionResizeMode(c, QHeaderView.ResizeMode.Fixed)
+                self.webhooks_table.setColumnWidth(c, 150)
+
+            self.webhooks_table.setRowCount(0)
+            for wh in saved:
+                add_webhook_row(
+                    wh.get("name", ""),
+                    wh.get("url", ""),
+                    wh.get("biomes") or [],
+                    wh.get("biome_modes") or {},
+                    wh.get("users") if wh.get("users_explicit") else None,
+                    wh.get("biome_role_pings") or {},
+                    wh.get("user_filter_mode", "whitelist"),
+                )
+            _apply_webhook_biome_column_visibility(hidden)
+
+        def _open_custom_biomes_dialog():
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Custom Biomes")
+            dlg.resize(520, 560)
+
+            v = QVBoxLayout(dlg)
+            hint = QLabel(
+                "Add your own biomes, or override a built-in one. "
+                "The name must match the biome text Roblox reports (case does not matter). "
+                "Removing only clears your own entry - built-in biomes come back."
+            )
+            hint.setWordWrap(True)
+            v.addWidget(hint)
+
+            lw = QListWidget()
+            v.addWidget(lw, 1)
+
+            form = QFormLayout()
+            name_edit = QLineEdit(); name_edit.setPlaceholderText("INCINERATOR")
+            color_edit = QLineEdit(); color_edit.setPlaceholderText("0xff6a00 (optional)")
+            timer_edit = QLineEdit(); timer_edit.setPlaceholderText("duration in seconds (optional)")
+            thumb_edit = QLineEdit(); thumb_edit.setPlaceholderText("thumbnail URL (optional)")
+            form.addRow("Name", name_edit)
+            form.addRow("Color", color_edit)
+            form.addRow("Timer (s)", timer_edit)
+            form.addRow("Thumbnail", thumb_edit)
+            v.addLayout(form)
+
+            def _refresh():
+                lw.clear()
+                custom = {str(k).upper() for k in load_custom_biomes().keys()}
+                for b in biome_names():
+                    label = f"{b}  (custom)" if str(b).upper() in custom else str(b)
+                    item = QListWidgetItem(label)
+                    item.setData(Qt.ItemDataRole.UserRole, str(b))
+                    lw.addItem(item)
+
+            def _on_pick():
+                item = lw.currentItem()
+                if item is None:
+                    return
+                b = str(item.data(Qt.ItemDataRole.UserRole))
+                color, thumb = biome_meta(b)
+                dur = biome_duration(b)
+                name_edit.setText(b)
+                color_edit.setText("0x%06x" % int(color))
+                thumb_edit.setText(thumb)
+                timer_edit.setText("" if dur is None else str(dur))
+
+            def _save():
+                try:
+                    saved_name = save_custom_biome(
+                        name_edit.text(),
+                        color_edit.text(),
+                        thumb_edit.text(),
+                        timer_edit.text().strip() or None,
+                    )
+                except Exception as e:
+                    QMessageBox.warning(dlg, "Custom Biomes", f"Could not save: {e}")
+                    return
+                _rebuild_biome_columns()
+                _refresh()
+                QMessageBox.information(dlg, "Custom Biomes", f"Saved {saved_name}.")
+
+            def _remove():
+                item = lw.currentItem()
+                if item is None:
+                    return
+                b = str(item.data(Qt.ItemDataRole.UserRole))
+                try:
+                    removed = delete_custom_biome(b)
+                except Exception as e:
+                    QMessageBox.warning(dlg, "Custom Biomes", f"Could not remove: {e}")
+                    return
+                if not removed:
+                    QMessageBox.information(dlg, "Custom Biomes", f"{b} is built in - nothing of yours to remove.")
+                    return
+                _rebuild_biome_columns()
+                _refresh()
+
+            row = QHBoxLayout()
+            save_btn = QPushButton("Add / Update")
+            del_btn = QPushButton("Remove")
+            row.addWidget(save_btn); row.addWidget(del_btn); row.addStretch()
+            v.addLayout(row)
+
+            btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            v.addWidget(btn_box)
+
+            lw.currentRowChanged.connect(lambda _: _on_pick())
+            save_btn.clicked.connect(_save)
+            del_btn.clicked.connect(_remove)
+            btn_box.rejected.connect(dlg.reject)
+            btn_box.accepted.connect(dlg.accept)
+
+            _refresh()
+            dlg.exec()
+
         cols_btn.clicked.connect(_open_webhook_columns_dialog)
+        custom_biomes_btn.clicked.connect(_open_custom_biomes_dialog)
         role_ping_btn.clicked.connect(_open_webhook_role_ping_dialog)
 
         # expose helpers for load/save
@@ -26907,12 +27635,16 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         content_layout.addWidget(webhooks_group)
 
-        # --- Multiscope — Merchant & Pings (simple, no custom helpers) ---
+        # --- Multiscope, Merchant & Pings (simple, no custom helpers) ---
         ms_box = QGroupBox("Merchant Webhook & Pings")
         ms_form = QFormLayout(ms_box)
 
         self.ms_merchant_webhook_input = QLineEdit()
         self.ms_merchant_webhook_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.ms_player_tracker_input = QLineEdit()
+        self.ms_player_tracker_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ms_player_tracker_input.setPlaceholderText("Discord webhook for player-join logs (optional)")
 
         self.ms_enable_jester = QCheckBox("Enable Jester pings")
         self.ms_enable_mari   = QCheckBox("Enable Mari pings")
@@ -26941,6 +27673,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         rin_h.addWidget(self.ms_rin_type); rin_h.addWidget(self.ms_rin_id)
 
         ms_form.addRow("Merchant Webhook URL", self.ms_merchant_webhook_input)
+        ms_form.addRow("Player Tracker Webhook URL", self.ms_player_tracker_input)
         ms_form.addRow("Merchant Detection Mode", self.ms_merchant_detection_mode)
         ms_form.addRow(self.ms_enable_jester)
         ms_form.addRow("Jester ping type / ID", jester_row)
@@ -26962,7 +27695,9 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         buttons_layout = QHBoxLayout()
         save_settings_btn = QPushButton("Save Settings"); save_settings_btn.setProperty("class", "success"); save_settings_btn.clicked.connect(lambda: self.save_settings())
         reset_settings_btn = QPushButton("Reset to Defaults"); reset_settings_btn.clicked.connect(self.reset_settings)
-        buttons_layout.addWidget(save_settings_btn); buttons_layout.addWidget(reset_settings_btn); buttons_layout.addStretch()
+        export_config_btn = QPushButton("Export Config"); export_config_btn.setToolTip("Export all configured settings to a single file."); export_config_btn.clicked.connect(self.export_config)
+        import_config_btn = QPushButton("Import Config"); import_config_btn.setToolTip("Load a config file and make it the active settings."); import_config_btn.clicked.connect(self.import_config)
+        buttons_layout.addWidget(save_settings_btn); buttons_layout.addWidget(reset_settings_btn); buttons_layout.addWidget(export_config_btn); buttons_layout.addWidget(import_config_btn); buttons_layout.addStretch()
         content_layout.addLayout(buttons_layout); content_layout.addStretch()
 
         scroll_area.setWidget(content_widget); layout.addWidget(scroll_area)
@@ -27115,7 +27850,23 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         developer_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         developer_layout.setSpacing(40)
 
-        # — Jirach1 —
+        #, ManasAarohi,
+        bytes_m = b""
+        try:
+            bytes_m = Path(__file__).with_name("manas.png").read_bytes()
+        except Exception:
+            try:
+                from urllib.request import Request
+                req = Request(
+                    "https://cdn.discordapp.com/avatars/561923311530016790/5ec41258a398f8aec742d74e6f1978ec.png?size=4096",
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                bytes_m = urlopen(req).read()
+            except Exception:
+                bytes_m = b""
+        developer_layout.addWidget(self._make_dev_card("ManasAarohi", bytes_m))
+
+        #, Jirach1,
         bytes_j = b""
         try:
             bytes_j = Path(__file__).with_name("jirachi.gif").read_bytes()
@@ -27127,7 +27878,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         developer_layout.addWidget(self._make_dev_card("Jirach1", bytes_j))
 
-        # — cresqnt —
+        #, cresqnt,
         bytes_c = b""
         try:
             bytes_c = Path(__file__).with_name("cresqnt.gif").read_bytes()
@@ -27143,6 +27894,28 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         support_group = QGroupBox("Essentials")
         support_layout = QVBoxLayout(support_group)
+
+        support_label_manas = QLabel("Manas Biome Hunt:")
+        support_label_manas.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-bottom: 5px;")
+        support_layout.addWidget(support_label_manas)
+
+        discord_btn_manas = QPushButton("https://discord.gg/oppression")
+        discord_btn_manas.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #5865F2;
+                color: white;
+                border: none;
+                padding: 12px 20px;
+                border-radius: 6px;
+                font-weight: bold;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                background-color: #4752C4;
+            }}
+        """)
+        discord_btn_manas.clicked.connect(lambda: self.open_url("https://discord.gg/oppression"))
+        support_layout.addWidget(discord_btn_manas)
 
         support_label = QLabel("The Official J.Jaram Discord Server:")
         support_label.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-bottom: 5px;")
@@ -27365,7 +28138,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             QMessageBox.information(self, "Success",
                 f"Imported {len(new_users)} accounts.\n"
                 f"Total users.json entries: {len(merged)}")
-            self.add_log("RAM import complete — users.json updated.")
+            self.add_log("RAM import complete, users.json updated.")
         else:
             err = self.config_manager.get_cookie_error()
             msg = "Failed to write users.json!"
@@ -30078,6 +30851,12 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         if not isinstance(users_cfg, dict):
             users_cfg = {}
 
+        # When the manager isn't running self.user_data is empty; fall back to the
+        # configured accounts so the Users tab shows them (Offline) instead of blank.
+        data_source = self.user_data or {}
+        if not data_source and users_cfg:
+            data_source = {str(uid): {"status": "Offline"} for uid in users_cfg.keys()}
+
         try:
             def _uid_sort_key(value: object) -> tuple:
                 s = str(value)
@@ -30087,7 +30866,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                     return (1, 0, s)
 
             ordered = sorted(
-                (self.user_data or {}).items(),
+                data_source.items(),
                 key=lambda kv: (
                     bool(
                         (users_cfg.get(str(kv[0]), {}) or {}).get("bad", False)
@@ -30098,7 +30877,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 ),
             )
         except Exception:
-            ordered = list((self.user_data or {}).items())
+            ordered = list(data_source.items())
 
         ordered_uids = [str(uid) for uid, _runtime in ordered]
         try:
@@ -31056,6 +31835,12 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 "w": int((getattr(self, "_roblox_window_geometry", {}) or {}).get("w", 0) or 0),
                 "h": int((getattr(self, "_roblox_window_geometry", {}) or {}).get("h", 0) or 0),
             },
+            "roblox_resizer": {
+                "enabled": bool(self.resizer_enable_chk.isChecked()) if hasattr(self, "resizer_enable_chk") else False,
+                "width": int(self.resizer_width_input.value()) if hasattr(self, "resizer_width_input") else 200,
+                "height": int(self.resizer_height_input.value()) if hasattr(self, "resizer_height_input") else 150,
+                "interval": 3,
+            },
             "timeouts": {
                 "initial_delay": int(self.settings_initial_delay_input.value()),
                 "offline": int(self.settings_offline_threshold_input.value()),
@@ -31108,6 +31893,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             },
             "multiscope": {
                 "merchant_webhook": str(self.ms_merchant_webhook_input.text().strip()) if hasattr(self, "ms_merchant_webhook_input") else "",
+                "player_tracker_webhook": str(self.ms_player_tracker_input.text().strip()) if hasattr(self, "ms_player_tracker_input") else "",
                 "enable_jester": bool(self.ms_enable_jester.isChecked()) if hasattr(self, "ms_enable_jester") else True,
                 "enable_mari": bool(self.ms_enable_mari.isChecked()) if hasattr(self, "ms_enable_mari") else True,
                 "enable_rin": bool(self.ms_enable_rin.isChecked()) if hasattr(self, "ms_enable_rin") else True,
@@ -31141,6 +31927,9 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 "hide_discord_tabs": bool(
                     self.misc_hide_discord_tabs_chk.isChecked()
                 ) if hasattr(self, "misc_hide_discord_tabs_chk") else True,
+                "close_bootstrapper_error_popups": bool(
+                    self.misc_close_bootstrapper_error_popups_chk.isChecked()
+                ) if hasattr(self, "misc_close_bootstrapper_error_popups_chk") else True,
             },
         }
         return snapshot
@@ -31269,6 +32058,40 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         if result == QMessageBox.StandardButton.No:
             self.load_settings_tab()
 
+    def _apply_roblox_resizer(self):
+        """Shrink every live Roblox window's client (render) area to the set size."""
+        try:
+            from roblox_resizer import find_roblox_windows, resize_client, strip_frame
+        except Exception:
+            return
+        w = int(getattr(self, "_resizer_w", 200) or 1)
+        h = int(getattr(self, "_resizer_h", 150) or 1)
+        for hwnd in find_roblox_windows():
+            try:
+                strip_frame(hwnd)          # remove title bar/borders -> pure render pixels
+                resize_client(hwnd, w, h)  # size the render area (bypasses Roblox min clamp)
+            except Exception:
+                pass
+
+    def _on_resizer_settings_changed(self, *_):
+        """Live-apply the resizer toggle/size from the Settings UI (no restart)."""
+        try:
+            self._resizer_w = max(1, int(self.resizer_width_input.value()))
+            self._resizer_h = max(1, int(self.resizer_height_input.value()))
+            enabled = bool(self.resizer_enable_chk.isChecked())
+        except Exception:
+            return
+        if not getattr(self, "_resizer_timer", None):
+            self._resizer_timer = QTimer(self)
+            self._resizer_timer.setInterval(3000)  # re-shrink new windows every 3s
+            self._resizer_timer.timeout.connect(self._apply_roblox_resizer)
+        if enabled:
+            if not self._resizer_timer.isActive():
+                self._resizer_timer.start()
+            self._apply_roblox_resizer()  # immediate pass
+        else:
+            self._resizer_timer.stop()
+
     def load_settings_tab(self):
         """Populate Settings UI from settings.json (timings + shutdown monitor + tri-mode webhooks + optional merchant/pings)."""
         settings = self.config_manager.load_settings()
@@ -31301,6 +32124,21 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             self._refresh_rbwin_geom_status()
         except Exception:
             pass
+
+        # ---------- Roblox Resizer ----------
+        rz = settings.get("roblox_resizer", {}) or {}
+        if not isinstance(rz, dict):
+            rz = {}
+        if hasattr(self, "resizer_enable_chk"):
+            try:
+                self.resizer_width_input.setValue(int(rz.get("width", 200) or 200))
+                self.resizer_height_input.setValue(int(rz.get("height", 150) or 150))
+                self.resizer_enable_chk.setChecked(bool(rz.get("enabled", False)))
+                # setChecked/setValue fire _on_resizer_settings_changed, which starts
+                # the timer if enabled -- so a saved-enabled state auto-applies on load.
+                self._on_resizer_settings_changed()
+            except Exception:
+                pass
 
         # ---------- Timing (timeouts) ----------
         t = settings.get("timeouts", {}) or {}
@@ -31412,6 +32250,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         ms = settings.get("multiscope", {}) or {}
         if hasattr(self, "ms_merchant_webhook_input"):
             self.ms_merchant_webhook_input.setText(ms.get("merchant_webhook", ""))
+        if hasattr(self, "ms_player_tracker_input"):
+            self.ms_player_tracker_input.setText(ms.get("player_tracker_webhook", ""))
 
         if hasattr(self, "ms_enable_jester"):
             self.ms_enable_jester.setChecked(bool(ms.get("enable_jester", True)))
@@ -31452,6 +32292,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         disable_manager_bad_marking = None
         msedge_limiter_enabled = None
         hide_discord_tabs = None
+        close_bootstrapper_error_popups = None
         if isinstance(misc, dict) and "skip_webhook_unknown_context" in misc:
             skip_unknown = bool(misc.get("skip_webhook_unknown_context", False))
         if isinstance(misc, dict) and MISC_DISABLE_LOG_MERCHANTS_WHEN_OCR_ACTIVE_KEY in misc:
@@ -31466,6 +32307,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             msedge_limiter_enabled = bool(misc.get("msedgewebview2_limiter_enabled", True))
         if isinstance(misc, dict) and "hide_discord_tabs" in misc:
             hide_discord_tabs = bool(misc.get("hide_discord_tabs", True))
+        if isinstance(misc, dict) and "close_bootstrapper_error_popups" in misc:
+            close_bootstrapper_error_popups = bool(misc.get("close_bootstrapper_error_popups", True))
         if skip_unknown is None:
             ocr_cfg = settings.get("ocr", {}) or {}
             if isinstance(ocr_cfg, dict) and "skip_webhook_unknown_context" in ocr_cfg:
@@ -31497,6 +32340,10 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             hide_discord_tabs = bool(
                 self.config_manager.default_settings.get("misc", {}).get("hide_discord_tabs", True)
             )
+        if close_bootstrapper_error_popups is None:
+            close_bootstrapper_error_popups = bool(
+                self.config_manager.default_settings.get("misc", {}).get("close_bootstrapper_error_popups", True)
+            )
         if hasattr(self, "misc_skip_unknown_webhook_chk"):
             self.misc_skip_unknown_webhook_chk.setChecked(bool(skip_unknown))
         if hasattr(self, "misc_disable_log_merchants_when_ocr_active_chk"):
@@ -31520,6 +32367,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         if hasattr(self, "misc_hide_discord_tabs_chk"):
             self.misc_hide_discord_tabs_chk.setChecked(bool(hide_discord_tabs))
         self._apply_discord_tabs_visibility(bool(hide_discord_tabs))
+        if hasattr(self, "misc_close_bootstrapper_error_popups_chk"):
+            self.misc_close_bootstrapper_error_popups_chk.setChecked(bool(close_bootstrapper_error_popups))
 
         # ---------- OCR tab ----------
         self._apply_ocr_settings_to_ui(settings.get("ocr", {}))
@@ -31639,6 +32488,108 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             "Recorded",
             "Roblox window size/position recorded.\n\nClick “Save Settings” to persist this change.",
         )
+
+    def _scrub_config_webhooks(self, cfg):
+        """Return a copy of the config with all webhook URLs blanked."""
+        def walk(o):
+            if isinstance(o, dict):
+                out = {}
+                for k, v in o.items():
+                    if k == "webhooks" and isinstance(v, list):
+                        items = []
+                        for it in v:
+                            if isinstance(it, dict):
+                                it = dict(it)
+                                if "url" in it:
+                                    it["url"] = ""
+                            items.append(it)
+                        out[k] = items
+                    elif isinstance(v, str) and "webhook" in str(k).lower():
+                        out[k] = ""
+                    else:
+                        out[k] = walk(v)
+                return out
+            if isinstance(o, list):
+                return [walk(it) for it in o]
+            return o
+        return walk(cfg)
+
+    def export_config(self):
+        try:
+            cfg = self.config_manager.load_settings() or {}
+        except Exception as e:
+            QMessageBox.critical(self, "Export Config", f"Could not read settings: {e}")
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Export Config")
+        box.setText(
+            "This exports ALL of your configured settings into one file.\n\n"
+            "WARNING: it contains your Discord webhook URLs. Anyone with this file "
+            "can post to your webhooks \u2014 do not share it publicly.\n\n"
+            "Include webhook info in the export?"
+        )
+        include_btn = box.addButton("Include webhooks", QMessageBox.ButtonRole.AcceptRole)
+        exclude_btn = box.addButton("Exclude webhooks", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is None or clicked is cancel_btn:
+            return
+        if clicked is exclude_btn:
+            cfg = self._scrub_config_webhooks(cfg)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Config", "jaram_config.json", "JSON Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            QMessageBox.critical(self, "Export Config", f"Failed to write file: {e}")
+            return
+        suffix = " (webhooks excluded)" if clicked is exclude_btn else ""
+        QMessageBox.information(self, "Export Config", f"Config exported{suffix} to:\n{path}")
+
+    def import_config(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Config", "", "JSON Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Import Config", f"Could not read config file: {e}")
+            return
+        if not isinstance(data, dict):
+            QMessageBox.critical(self, "Import Config", "Invalid config file (expected a JSON object).")
+            return
+        reply = QMessageBox.question(
+            self, "Import Config",
+            "This will REPLACE your current settings with the imported config.\n\n"
+            "Your accounts (users) are not affected. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.config_manager.save_settings(data)
+        except Exception as e:
+            QMessageBox.critical(self, "Import Config", f"Failed to save config: {e}")
+            return
+        try:
+            self.load_settings_tab()
+        except Exception:
+            pass
+        # Re-run the normal save path so every live-apply hook fires with the imported values.
+        try:
+            self.save_settings(confirm=False)
+        except Exception:
+            pass
+        QMessageBox.information(self, "Import Config", "Config imported and now in use.")
 
     def save_settings(self, *args, confirm: bool = True):
         """Collect Settings UI and persist to settings.json, then live-apply."""
@@ -31773,6 +32724,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         ms = settings.get("multiscope", {}) or {}
         if hasattr(self, "ms_merchant_webhook_input"):
             ms["merchant_webhook"] = self.ms_merchant_webhook_input.text().strip()
+        if hasattr(self, "ms_player_tracker_input"):
+            ms["player_tracker_webhook"] = self.ms_player_tracker_input.text().strip()
 
         if hasattr(self, "ms_enable_jester"):
             ms["enable_jester"] = bool(self.ms_enable_jester.isChecked())
@@ -31822,6 +32775,10 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             )
         if hasattr(self, "misc_hide_discord_tabs_chk"):
             misc["hide_discord_tabs"] = bool(self.misc_hide_discord_tabs_chk.isChecked())
+        if hasattr(self, "misc_close_bootstrapper_error_popups_chk"):
+            misc["close_bootstrapper_error_popups"] = bool(
+                self.misc_close_bootstrapper_error_popups_chk.isChecked()
+            )
         settings["misc"] = misc
         legacy_bes_cfg = settings.get("bes")
         if isinstance(legacy_bes_cfg, dict):
@@ -32038,6 +32995,10 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             hide_discord_tabs = bool(defaults.get("misc", {}).get("hide_discord_tabs", True))
             self.misc_hide_discord_tabs_chk.setChecked(hide_discord_tabs)
             self._apply_discord_tabs_visibility(hide_discord_tabs)
+        if hasattr(self, "misc_close_bootstrapper_error_popups_chk"):
+            self.misc_close_bootstrapper_error_popups_chk.setChecked(
+                bool(defaults.get("misc", {}).get("close_bootstrapper_error_popups", True))
+            )
 
         QMessageBox.information(
             self,
@@ -32165,8 +33126,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
     def show_about(self):
         config_info = self.config_manager.get_config_info()
-        QMessageBox.about(self, "About J.JARAM",
-                         "J.JARAM (Jirach1's Just Another Roblox Account Manager) JX 2x81\n\n"
+        QMessageBox.about(self, "About M.J.JARAM",
+                         "M.J.JARAM (Jirach1's Just Another Roblox Account Manager) JX 2x71\n\n"
                          "Advanced multi-account Roblox session manager\n"
                          "with automated log based monitoring and process management.\n\n"
                          "Built with PySide6 and modern design principles.\n\n"
@@ -32675,8 +33636,20 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
     def refresh_accounts_list(self):
         users_config = self.config_manager.load_users()
-        self.accounts_list.setRowCount(len(users_config))
-        for row, (user_id, user_info) in enumerate(users_config.items()):
+        query = ""
+        try:
+            if hasattr(self, "accounts_search_input"):
+                query = str(self.accounts_search_input.text() or "").strip().lower()
+        except Exception:
+            query = ""
+        items = [
+            (uid, info) for uid, info in users_config.items()
+            if not query
+            or query in str(uid).lower()
+            or query in str((info.get("username") if isinstance(info, dict) else "") or f"User_{uid}").lower()
+        ]
+        self.accounts_list.setRowCount(len(items))
+        for row, (user_id, user_info) in enumerate(items):
             if isinstance(user_info, dict):
                 username = user_info.get("username", f"User_{user_id}")
                 server_type = self._infer_account_server_type(user_info)
@@ -33000,6 +33973,43 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             self.refresh_users()
             self.refresh_accounts_list()
             QMessageBox.information(self, "Accounts Disabled", f"Disabled {changed} account(s).")
+        else:
+            QMessageBox.critical(self, "Error", "Failed to save account configuration.")
+
+    def delete_selected_accounts(self, table=None):
+        if table is None:
+            table = getattr(self, "accounts_list", None)
+        user_ids = self._get_selected_user_ids(table)
+        if not user_ids:
+            label = self._selection_label_for_table(table)
+            QMessageBox.information(self, f"Select {label}", f"Select one or more {label.lower()} rows first.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Delete {len(user_ids)} selected account(s)? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        users_config = self.config_manager.load_users()
+        removed = 0
+        removed_ids: List[str] = []
+        for uid in user_ids:
+            if uid in users_config:
+                users_config.pop(uid, None)
+                removed += 1
+                removed_ids.append(uid)
+        if removed == 0:
+            QMessageBox.information(self, "No Changes", "No matching accounts to delete.")
+            return
+        if self.config_manager.save_users(users_config):
+            if removed_ids and self.worker_thread and self.worker_thread.isRunning():
+                for uid in removed_ids:
+                    self._queue_worker_action("kill_user_processes", uid)
+            self.refresh_accounts_list()
+            self.refresh_users()
+            QMessageBox.information(self, "Accounts Deleted", f"Deleted {removed} account(s).")
         else:
             QMessageBox.critical(self, "Error", "Failed to save account configuration.")
 
@@ -33806,18 +34816,18 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
         biome_payload = {"content": "", "embeds": [{
-            "title": "🌍 Biome — TEST_BIOME",
+            "title": "🌍 Biome, TEST_BIOME",
             "description": "**User:** `TestUser`\n**Server:** `PS:TEST…`",
             "timestamp": now_iso, "color": 0x3BA55D
         }]}
 
         merch_payload_j = {"content": j_ping, "embeds": [{
-            "title": "🛒 Merchant — Jester",
+            "title": "🛒 Merchant, Jester",
             "description": "**User:** `TestUser`\n**Server:** `PS:TEST…`",
             "timestamp": now_iso, "color": 0x5865F2
         }]}
         merch_payload_m = {"content": m_ping, "embeds": [{
-            "title": "🛒 Merchant — Mari",
+            "title": "🛒 Merchant, Mari",
             "description": "**User:** `TestUser`\n**Server:** `PS:TEST…`",
             "timestamp": now_iso, "color": 0xE67E22
         }]}
@@ -33849,8 +34859,8 @@ def main():
 
     app = QApplication(sys.argv)
 
-    app.setApplicationName("J.JARAM")
-    app.setApplicationVersion("JX 2x81")
+    app.setApplicationName("M.J.JARAM")
+    app.setApplicationVersion("JX 2x71")
     app.setOrganizationName("Jirach1")
     # Qt 6 ships a Windows 11 style that can change widget visuals. Force the
     # Windows 10-era style for consistent UI across OS versions.

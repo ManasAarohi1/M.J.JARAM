@@ -70,7 +70,7 @@ class ItemRule:
     alert_message: str = ""
 
 
-APP_FOOTER = "J.JARAM JX 2x27"
+APP_FOOTER = "M.J.JARAM JX 2x27"
 
 
 _AUTO_ITEM_ALERT_UNLOCKED = False

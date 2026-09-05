@@ -25,6 +25,7 @@
 #include <optional>
 #include <queue>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -38,12 +39,17 @@ namespace {
 
 constexpr DWORD kInvalidSuspendCount = 0xFFFFFFFFu;
 
+// NOTE: must stay free of the CPython C-API. This is reached from scheduler_loop()
+// and BESLimiterWorker::run(), which are raw std::threads with no PyThreadState and
+// no GIL; PyErr_SetString() there dereferences a NULL tstate and hard-crashes the
+// process (0xC0000005). std::runtime_error is translated to Python RuntimeError by
+// pybind11 at the binding boundary, where the GIL is held. Same pattern as
+// ram_limiter_native.cpp.
 [[noreturn]] void throw_win_error(const char* prefix) {
   const DWORD err = ::GetLastError();
   std::ostringstream oss;
   oss << prefix << " (WinError " << err << ")";
-  PyErr_SetString(PyExc_OSError, oss.str().c_str());
-  throw py::error_already_set();
+  throw std::runtime_error(oss.str());
 }
 
 std::string now_hhmmss() {

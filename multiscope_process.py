@@ -202,6 +202,7 @@ def _multiscope_worker_main(cmd_q: mp.Queue, out_q: mp.Queue) -> None:
                                 pending_configure_webhooks.get("in_menu_none_timeout_seconds", 120.0)
                                 or 120.0
                             ),
+                            player_tracker_hook=str(pending_configure_webhooks.get("player_tracker_hook") or ""),
                         )
                 except Exception:
                     pass
@@ -296,6 +297,7 @@ def _multiscope_worker_main(cmd_q: mp.Queue, out_q: mp.Queue) -> None:
                     in_menu_none_timeout_seconds=float(
                         cmd.get("in_menu_none_timeout_seconds", 120.0) or 120.0
                     ),
+                    player_tracker_hook=str(cmd.get("player_tracker_hook") or ""),
                 )
 
             elif ctype == "recover_user_log_tracking":
@@ -569,6 +571,7 @@ class MultiScopeProcessProxy:
         biome_modes: Optional[Dict[str, str]] = None,
         skip_webhook_unknown_context: bool = False,
         in_menu_none_timeout_seconds: float = 120.0,
+        player_tracker_hook: str = "",
     ) -> None:
         self._drain_out_queue()
         self._send_cmd(
@@ -589,6 +592,7 @@ class MultiScopeProcessProxy:
                 "biome_modes": biome_modes,
                 "skip_webhook_unknown_context": bool(skip_webhook_unknown_context),
                 "in_menu_none_timeout_seconds": float(in_menu_none_timeout_seconds),
+                "player_tracker_hook": player_tracker_hook or "",
             }
         )
 
