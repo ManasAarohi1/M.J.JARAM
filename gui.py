@@ -4247,6 +4247,24 @@ def close_bootstrapper_error_dialogs() -> int:
     return closed
 
 
+class UpdateCheckThread(QThread):
+    """Ask GitHub whether a newer release exists. Never blocks the UI.
+
+    Emits found(tag, url) only when there is genuinely something newer;
+    stays silent on no network, rate limiting, or an unparseable tag.
+    """
+    found = Signal(str, str)
+
+    def run(self):
+        try:
+            from version import check_for_update
+            rel = check_for_update()
+            if rel:
+                self.found.emit(rel["tag"], rel["url"])
+        except Exception:
+            pass
+
+
 class WorkerThread(QThread):
     log_signal     = Signal(str)
     status_signal  = Signal(object)
@@ -11569,6 +11587,18 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         about_action = help_menu.addAction("About")
         about_action.triggered.connect(self.show_about)
+
+        help_menu.addSeparator()
+        # Hidden until a check actually finds something newer.
+        self._update_menu_action = help_menu.addAction("Update available")
+        self._update_menu_action.setVisible(False)
+        self._update_menu_action.triggered.connect(self._open_update_url)
+        check_updates_action = help_menu.addAction("Check for Updates")
+        check_updates_action.triggered.connect(self.check_for_updates_manual)
+        self._update_url = ""
+        self._update_thread = None
+        # Silent background check on startup; the manual action reports either way.
+        QTimer.singleShot(3000, self.check_for_updates_startup)
 
         show_tutorial = False
         try:
@@ -33124,10 +33154,79 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to open folder: {e}")
 
+    # ── Update check ──────────────────────────────────────────────────────
+    def _start_update_check(self, on_done=None):
+        """Run one check in the background. on_done(rel_or_None) when finished."""
+        if getattr(self, "_update_thread", None) is not None and self._update_thread.isRunning():
+            return False
+        thread = UpdateCheckThread(self)
+        self._update_thread = thread
+        thread.found.connect(self._on_update_found)
+        if on_done is not None:
+            # `found` never fires when there is nothing new, so pair it with
+            # `finished` to give the manual path an "up to date" answer too.
+            hit = {"rel": None}
+            thread.found.connect(lambda tag, url: hit.update(rel=(tag, url)))
+            thread.finished.connect(lambda: on_done(hit["rel"]))
+        thread.start()
+        return True
+
+    def check_for_updates_startup(self):
+        """Silent: only speaks up when there is actually a newer release."""
+        try:
+            self._start_update_check()
+        except Exception:
+            pass
+
+    def check_for_updates_manual(self):
+        """User-initiated, so also say something when there is nothing new.
+
+        The "update available" dialog is raised by _on_update_found, which runs
+        for both the startup and manual checks, so this only covers the
+        up-to-date case -- otherwise a manual check would pop two dialogs.
+        """
+        from version import __version__
+
+        def _done(rel):
+            if not rel:
+                QMessageBox.information(
+                    self, "No Updates",
+                    f"You are running the latest version ({__version__}).",
+                )
+
+        if not self._start_update_check(_done):
+            QMessageBox.information(self, "Check for Updates", "A check is already running.")
+
+    def _on_update_found(self, tag: str, url: str):
+        from version import __version__
+
+        self._update_url = url
+        if hasattr(self, "_update_menu_action"):
+            self._update_menu_action.setText(f"Update available: {tag}")
+            self._update_menu_action.setVisible(True)
+        try:
+            self.add_log(f"[Update] {tag} is available - {url}")
+        except Exception:
+            pass
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Update Available")
+        box.setText(f"M.J.JARAM {tag} is available.\n\nYou are running {__version__}.")
+        open_btn = box.addButton("Open Release Page", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            self.open_url(url)
+
+    def _open_update_url(self):
+        if getattr(self, "_update_url", ""):
+            self.open_url(self._update_url)
+
     def show_about(self):
         config_info = self.config_manager.get_config_info()
         QMessageBox.about(self, "About M.J.JARAM",
-                         "M.J.JARAM (Jirach1's Just Another Roblox Account Manager) JX 2x71\n\n"
+                         f"M.J.JARAM (Jirach1's Just Another Roblox Account Manager) JX {__version__}\n\n"
                          "Advanced multi-account Roblox session manager\n"
                          "with automated log based monitoring and process management.\n\n"
                          "Built with PySide6 and modern design principles.\n\n"
@@ -34859,8 +34958,9 @@ def main():
 
     app = QApplication(sys.argv)
 
+    from version import __version__ as _app_version
     app.setApplicationName("M.J.JARAM")
-    app.setApplicationVersion("JX 2x71")
+    app.setApplicationVersion(f"JX {_app_version}")
     app.setOrganizationName("Jirach1")
     # Qt 6 ships a Windows 11 style that can change widget visuals. Force the
     # Windows 10-era style for consistent UI across OS versions.

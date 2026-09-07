@@ -70,7 +70,7 @@ class ItemRule:
     alert_message: str = ""
 
 
-APP_FOOTER = "M.J.JARAM JX 2x27"
+from version import APP_FOOTER  # single source of truth: version.py
 
 
 _AUTO_ITEM_ALERT_UNLOCKED = False

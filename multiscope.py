@@ -39,7 +39,7 @@ except Exception:
         return int(0x3BA55D), ""     # default color, empty thumbnail
     def biome_names() -> list[str]:
         return ["NORMAL"]
-APP_FOOTER = "M.J.JARAM JX 2x71"
+from version import APP_FOOTER  # single source of truth: version.py
 HARD_EVERYONE_BIOMES = {"GLITCHED", "DREAMSPACE", "CYBERSPACE"}
 
 # Webhook send retry budget per hook, by biome tier. Priority biomes are rare and
