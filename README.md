@@ -1,7 +1,7 @@
 <div align="center">
   <img src="JARAM.ico" alt="JARAM Logo" width="64" height="64">
   <h1>JARAM</h1>
-  <p><strong>Just Another Roblox Account Manager</strong></p>
+  <p><strong>Manas Jirach1 Just Another Roblox Account Manager</strong></p>
   <p>Manage multiple Roblox accounts with automatic relaunching, server tracking, and optional OCR/automation tooling.</p>
 </div>
 
