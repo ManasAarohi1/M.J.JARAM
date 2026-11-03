@@ -10,7 +10,6 @@ from __future__ import annotations
 import ctypes
 import json
 import os
-import random
 import sys
 import threading
 import time
@@ -70,7 +69,7 @@ class ItemRule:
     alert_message: str = ""
 
 
-from version import APP_FOOTER  # single source of truth: version.py
+APP_FOOTER = "M.J.JARAM JX 2x27"
 
 
 _AUTO_ITEM_ALERT_UNLOCKED = False
@@ -281,13 +280,6 @@ def _mouse_move_instant(x: int, y: int) -> None:
         autoit.mouse_move(int(x), int(y), speed=0)
     except Exception:
         pass
-
-
-def _mouse_move_natural(x: int, y: int) -> None:
-    """
-    Legacy name used by earlier versions. Auto-Item now uses instant movement + a tiny pre-click wiggle.
-    """
-    _mouse_move_instant(x, y)
 
 
 # ---------------------------

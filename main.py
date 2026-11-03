@@ -286,7 +286,7 @@ class RobloxManager:
             if hasattr(self.config_manager, 'get_users_for_manager'):
                 return self.config_manager.get_users_for_manager()   # keep ALL users
 
-            elif not is_alternate:
+            else:
                 users = self.config_manager.load_users()
 
             if not users:
@@ -348,36 +348,6 @@ class ProcessTracker:
 class AuthenticationHandler:
     def __init__(self):
         self.token_cache = {}
-
-    def retrieve_csrf_token(self, cookie):
-        cookie = str(cookie or "").strip()
-        if normalize_roblosecurity_cookie_value is not None:
-            try:
-                cookie = normalize_roblosecurity_cookie_value(cookie)
-            except Exception:
-                cookie = str(cookie or "").strip()
-        if cookie in self.token_cache and self.token_cache[cookie]["expires"] > time.time():
-            return self.token_cache[cookie]["token"]
-
-        session = requests.Session()
-        session.cookies[".ROBLOSECURITY"] = cookie
-        session.headers.update({
-            "Referer": "https://www.roblox.com/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        })
-
-        try:
-            response = session.post("https://auth.roblox.com/v1/authentication-ticket", timeout=5)
-            if response.status_code == 403 and "x-csrf-token" in response.headers:
-                token = response.headers["x-csrf-token"]
-                self.token_cache[cookie] = {
-                    "token": token,
-                    "expires": time.time() + 1800
-                }
-                return token
-        except Exception as error:
-            pass
-        return None
 
     def obtain_auth_ticket(self, cookie):
         cookie = str(cookie or "").strip()
@@ -468,12 +438,6 @@ class ProcessManager:
     def __init__(self, excluded_pid=0):
         self.excluded_pid = excluded_pid
         self.process_name = "RobloxPlayerBeta.exe"
-
-    def is_game_active(self):
-        for process in psutil.process_iter(['name', 'pid']):
-            if process.info['name'] == self.process_name and process.info['pid'] != self.excluded_pid:
-                return True
-        return False
 
     def terminate_process(self, pid=None, tracker=None):
         """
@@ -1204,7 +1168,7 @@ class GameLauncher:
 
 
     def _convert_share_link(self, share_code, cookie):
-        import requests, json
+        import requests
         cookie = str(cookie or "")
         if normalize_roblosecurity_cookie_value is not None:
             try:

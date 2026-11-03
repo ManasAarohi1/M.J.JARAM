@@ -502,8 +502,12 @@ class DiscordBotService:
                         "/psl <account> [place_id] [game_slug] [server_name] [estimated_value] [only_without_private_server_link]",
                         "/block <account> <target>",
                         "/unblock <account> <target>",
+                        "/manager <status|start|pause|resume|stop>",
+                        "/biomes",
+                        "/scbr <sc|br|both> <on|off>",
+                        "/found",
                         "",
-                        "Admin access detected: list, status, enable, disable, action, clearflags, restartall, psl, block, and unblock can use admin access.",
+                        "Admin access detected: every command above can use admin access.",
                     ]
                 )
             elif user_account_list_visible:
@@ -679,6 +683,57 @@ class DiscordBotService:
                 },
                 timeout=10.0,
             )
+            await _reply(interaction, str(response.get("message") or "Request completed."), ephemeral=True)
+
+        async def _admin_only(interaction: Any) -> bool:
+            if _author_is_admin(interaction.user):
+                return True
+            msg = "You are not allowed to use admin-only JARAM commands."
+            await _reply(interaction, msg, ephemeral=True)
+            _record_command_usage(interaction, ok=False, message=msg)
+            return False
+
+        @bot.tree.command(name="manager", description="Show, start, pause, resume or stop the JARAM manager")
+        @discord.app_commands.describe(action="What to do (status by default)")
+        @discord.app_commands.choices(action=[
+            discord.app_commands.Choice(name=n, value=n) for n in ("status", "start", "pause", "resume", "stop")
+        ])
+        async def jaram_manager(interaction: Any, action: Optional[str] = "status") -> None:
+            if not await _admin_only(interaction):
+                return
+            response = service._request(
+                {"type": "manager_control", "action": str(action or "status"), **_usage_context(interaction)},
+                timeout=20.0,
+            )
+            await _reply(interaction, str(response.get("message") or "Request completed."), ephemeral=True)
+
+        @bot.tree.command(name="biomes", description="Show which accounts are in a special biome right now")
+        async def jaram_biomes(interaction: Any) -> None:
+            if not await _admin_only(interaction):
+                return
+            response = service._request({"type": "list_biomes", **_usage_context(interaction)}, timeout=10.0)
+            await _reply(interaction, str(response.get("message") or "Request completed."), ephemeral=True)
+
+        @bot.tree.command(name="scbr", description="Turn Auto Strange Controller / Biome Randomizer on or off")
+        @discord.app_commands.describe(item="Which item", enabled="On or off")
+        @discord.app_commands.choices(item=[
+            discord.app_commands.Choice(name=n, value=v)
+            for n, v in (("Strange Controller", "sc"), ("Biome Randomizer", "br"), ("Both", "both"))
+        ])
+        async def jaram_scbr(interaction: Any, item: str, enabled: bool) -> None:
+            if not await _admin_only(interaction):
+                return
+            response = service._request(
+                {"type": "set_auto_sc_br", "item": item, "enabled": bool(enabled), **_usage_context(interaction)},
+                timeout=10.0,
+            )
+            await _reply(interaction, str(response.get("message") or "Request completed."), ephemeral=True)
+
+        @bot.tree.command(name="found", description="Show how many biomes and merchants have been found")
+        async def jaram_found(interaction: Any) -> None:
+            if not await _admin_only(interaction):
+                return
+            response = service._request({"type": "found_stats", **_usage_context(interaction)}, timeout=10.0)
             await _reply(interaction, str(response.get("message") or "Request completed."), ephemeral=True)
 
         @bot.tree.command(name="psl", description="Run private server link grabber for one JARAM account")

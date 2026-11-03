@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Optional, Tuple
 
-__version__ = "2x81"
+__version__ = "2x71"
 
 # owner/repo whose Releases are checked for updates
 UPDATE_REPO = "ManasAarohi1/M.J.JARAM"

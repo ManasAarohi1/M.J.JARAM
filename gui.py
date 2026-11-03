@@ -17,21 +17,19 @@ from collections import deque
 from typing import Any, Dict, Set, List, Tuple, Optional, Sequence
 from datetime import datetime
 from pathlib import Path
-from urllib.request import urlopen
+
 from PIL import Image
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                            QHBoxLayout, QGridLayout, QTabWidget, QTableWidget,
+                            QHBoxLayout, QTableWidget,
                             QTableWidgetItem, QPushButton, QLabel, QLineEdit,
                             QSpinBox, QDoubleSpinBox, QSlider, QTextEdit, QGroupBox,
-                            QComboBox, QCheckBox, QSplitter, QStackedWidget,
+                            QComboBox, QCheckBox, QStackedWidget,
                             QAbstractSpinBox, QStyle, QStyleOptionSpinBox,
                             QHeaderView, QMessageBox, QDialog, QDialogButtonBox,
                             QFormLayout, QScrollArea, QSizePolicy, QFileDialog,
                             QAbstractScrollArea,
-                            QAbstractItemView, QHeaderView, QScrollArea, QRubberBand,
-                            QRadioButton, QListWidget, QListWidgetItem, QKeySequenceEdit,
-                            QStyledItemDelegate, QStyleOptionViewItem, QMenu,
-                            QToolButton)
+                            QAbstractItemView, QRubberBand,
+                            QListWidget, QListWidgetItem, QStyledItemDelegate, QStyleOptionViewItem, QToolButton)
 from PySide6.QtCore import (
     QTimer,
     QThread,
@@ -48,8 +46,7 @@ from PySide6.QtCore import (
     QRect,
     QPoint,
     QAbstractNativeEventFilter,
-    QEventLoop,
-)
+    )
 from PySide6.QtGui import QFont, QIcon, QColor, QPixmap, QMovie, QRegion, QPainter, QPainterPath, QImage, QTextCursor, QKeySequence, QBrush, QPen
 
 try:
@@ -477,11 +474,8 @@ from log_utils import (
     get_roblox_log_index,
 )
 from biomes import (
-    biome_names, biome_meta, biome_duration,
-    load_biomes_catalog, load_custom_biomes, save_custom_biome, delete_custom_biome,
-)
+    biome_names, )
 from utilities_tab import (
-    build_utilities_widget,
     _BlockWorker,
     _extract_place_id_from_text,
     _format_psl_place_history_label,
@@ -493,7 +487,6 @@ from utilities_tab import (
     _set_config_manager,
     shutdown_UTILITIES_tab,
 )
-from trimmer import setup_TRIMMER_tab
 from roblox_log_cleanup import (
     CleanupResult as RobloxLogCleanupResult,
     DEFAULT_CONFIG as ROBLOX_LOG_CLEANUP_DEFAULT_CONFIG,
@@ -503,13 +496,11 @@ from roblox_log_cleanup import (
     inactive_seconds as roblox_log_cleanup_inactive_seconds,
     normalize_cleanup_config as normalize_roblox_log_cleanup_config,
 )
-from discord_account_control import DiscordBotService, format_discord_ids, normalize_discord_ids
+from discord_account_control import DiscordBotService, normalize_discord_ids
 from found_stats import FoundStatsMixin
 from launch_priority import (
     DEFAULT_LAUNCH_PRIORITY,
     LAUNCH_LAST_ONCE_STATE_KEY,
-    MAX_LAUNCH_PRIORITY,
-    MIN_LAUNCH_PRIORITY,
     coerce_launch_priority,
     consume_launch_last_once,
     launch_queue_sort_key,
@@ -528,7 +519,7 @@ HARD_EVERYONE_BIOMES = {"GLITCHED", "DREAMSPACE", "CYBERSPACE"}
 WEBHOOK_ROLE_PINGS_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 WEBHOOK_USER_FILTER_MODE_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 AUTO_ACTION_LINK_BORDER_ROLE = int(Qt.ItemDataRole.UserRole) + 3
-from multiscope_process import MultiScopeProcessProxy
+
 from antiafk import AntiAFK
 from ocr_worker import (
     OCRWorker,
@@ -726,6 +717,10 @@ def _matches_bulk_user_delete_filters(
 
     return True
 
+import sol_layout
+import webhook_gate
+import ui_pages.shell as ui_shell
+
 # --- Auto Item engine (local module) ---
 try:
     from auto_actions_automation import AutoActionEngine as AutoItemEngine  # type: ignore
@@ -739,8 +734,7 @@ except Exception:  # pragma: no cover
     BESMultiProcessController = None  # type: ignore
 
 # --- minimal crash logging (EXE-safe, AV-friendly) ---
-import os, sys, atexit, logging, logging.handlers, threading, warnings, faulthandler, signal, uuid
-from pathlib import Path
+import atexit, logging, logging.handlers, warnings, faulthandler, signal
 
 # Put logs in Jaram folder
 _log_dir = Path(os.getenv("APPDATA", Path.home())) / "Jaram" / "logs"
@@ -938,6 +932,7 @@ class ConfigManager:
             "alerts": {
                 "webhook_url": "",
                 "blackout_ping": "",
+                "ratelimit_ping": "",
                 "cap_message": "",
                 "bad_message": "",
                 "hourly_users_report_enabled": False,
@@ -954,10 +949,10 @@ class ConfigManager:
             "multiscope": {
                 "webhooks": [],   # ← NEW
                 "player_tracker_webhook": "",
+                "sinister_webhook": "",
                 "enable_jester": True,
                 "enable_mari": True,
                 "enable_rin": True,
-                "merchant_detection_mode": "asset_id",
                 "jester_ping": "",
                 "mari_ping": "",
                 "rin_ping": "",
@@ -986,13 +981,12 @@ class ConfigManager:
                 "bes_wait_for_username_in_logs": True,
                 "disable_manager_bad_marking": False,
                 "msedgewebview2_limiter_enabled": True,
-                "hide_discord_tabs": True,
+                "hide_discord_tabs": False,
                 "close_bootstrapper_error_popups": True,
             },
             "cap_watchdog": dict(DEFAULT_CAP_WATCHDOG_SETTINGS),
             "ui": {
                 "show_tutorial_menu": False,
-                "webhooks_hidden_biomes": [],
                 "show_selected_sets_bes_exempt_slot1": False,
             },
             "utilities": {
@@ -1097,6 +1091,7 @@ class ConfigManager:
             "launch_priority": DEFAULT_LAUNCH_PRIORITY,
             "skip_reconnect_on_log_disconnect": False,
             "discord_user_ids": [],
+            "backup": False,
         }
 
         # Re-entrant because some cache update paths call helper methods that
@@ -2836,6 +2831,8 @@ class ConfigManager:
                     "launch_priority": coerce_launch_priority(user_info.get("launch_priority", DEFAULT_LAUNCH_PRIORITY)),
                     "skip_reconnect_on_log_disconnect": _skip_reconnect_on_log_disconnect(user_info),
                     "discord_user_ids": normalize_discord_ids(user_info.get("discord_user_ids")),
+                    "backup": bool(user_info.get("backup", False)),
+                    "solver_enabled": bool(user_info.get("solver_enabled", True)),
                 }
             else:
 
@@ -2924,7 +2921,7 @@ class ConfigManager:
 
         def _post():
             try:
-                requests.post(webhook_url, json={"content": msg}, timeout=8)
+                webhook_gate.post(webhook_url, json={"content": msg}, timeout=8)
             except Exception:
                 pass
 
@@ -2978,6 +2975,31 @@ class ConfigManager:
             alerts = settings.get("alerts", {}) or {}
             if isinstance(alerts, dict):
                 template = str(alerts.get("cap_message") or "").strip()
+        except Exception:
+            return
+
+        if not template:
+            return
+
+        webhook_url = self._resolve_alert_webhook_url(settings)
+        msg = self._build_user_alert_message(template, str(user_id), username)
+        self._dispatch_alert_message(webhook_url, msg)
+
+    def _send_cap_solved_alert_webhook(self, user_id: str, username: str = "") -> None:
+        """
+        Fire-and-forget Discord webhook alert when a captcha is successfully solved.
+        Uses settings.json -> alerts.{webhook_url, cap_solved_message}.
+        """
+        try:
+            settings = self.peek_settings() or {}
+        except Exception:
+            settings = {}
+
+        template = ""
+        try:
+            alerts = settings.get("alerts", {}) or {}
+            if isinstance(alerts, dict):
+                template = str(alerts.get("cap_solved_message") or "").strip()
         except Exception:
             return
 
@@ -3088,205 +3110,18 @@ class ConfigManager:
 
 
 class ModernStyle:
-    BACKGROUND = "#1e1e1e"
-    SURFACE = "#2d2d2d"
-    SURFACE_VARIANT = "#3d3d3d"
-    PRIMARY = "#6366f1"
-    PRIMARY_VARIANT = "#4f46e5"
-    SECONDARY = "#10b981"
-    ERROR = "#ef4444"
-    WARNING = "#f59e0b"
-    TEXT_PRIMARY = "#ffffff"
-    TEXT_SECONDARY = "#a1a1aa"
-    BORDER = "#404040"
-
-    @staticmethod
-    def get_stylesheet():
-        return f"""
-        QMainWindow {{
-            background-color: {ModernStyle.BACKGROUND};
-            color: {ModernStyle.TEXT_PRIMARY};
-        }}
-
-        QWidget {{
-            background-color: {ModernStyle.BACKGROUND};
-            color: {ModernStyle.TEXT_PRIMARY};
-            font-family: 'Segoe UI', Arial, sans-serif;
-        }}
-
-        QTabWidget::pane {{
-            border: 1px solid {ModernStyle.BORDER};
-            background-color: {ModernStyle.SURFACE};
-            border-radius: 8px;
-        }}
-
-        QTabBar::tab {{
-            background-color: {ModernStyle.SURFACE_VARIANT};
-            color: {ModernStyle.TEXT_SECONDARY};
-            padding: 12px 20px;
-            margin-right: 2px;
-            border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
-        }}
-
-        QTabBar::tab:selected {{
-            background-color: {ModernStyle.PRIMARY};
-            color: {ModernStyle.TEXT_PRIMARY};
-        }}
-
-        QTableWidget {{
-            background-color: {ModernStyle.SURFACE};
-            border: 1px solid {ModernStyle.BORDER};
-            border-radius: 8px;
-            gridline-color: {ModernStyle.BORDER};
-            selection-background-color: {ModernStyle.PRIMARY_VARIANT};
-        }}
-
-        QTableWidget::item {{
-            padding: 8px;
-            border-bottom: 1px solid {ModernStyle.BORDER};
-        }}
-
-        QHeaderView::section {{
-            background-color: {ModernStyle.SURFACE_VARIANT};
-            color: {ModernStyle.TEXT_PRIMARY};
-            padding: 10px;
-            border: none;
-            font-weight: bold;
-        }}
-
-        QPushButton {{
-            background-color: {ModernStyle.PRIMARY};
-            color: {ModernStyle.TEXT_PRIMARY};
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-            font-weight: 500;
-            min-width: 80px;
-            min-height: 28px;
-            font-size: 13px;
-        }}
-
-        QPushButton:hover {{
-            background-color: {ModernStyle.PRIMARY_VARIANT};
-        }}
-
-        QPushButton:pressed {{
-            background-color: 
-        }}
-
-        QPushButton:disabled {{
-            background-color: {ModernStyle.SURFACE_VARIANT};
-            color: {ModernStyle.TEXT_SECONDARY};
-        }}
-
-        QPushButton.success {{
-            background-color: {ModernStyle.SECONDARY};
-        }}
-
-        QPushButton.success:hover {{
-            background-color: 
-        }}
-
-        QPushButton.danger {{
-            background-color: {ModernStyle.ERROR};
-        }}
-
-        QPushButton.danger:hover {{
-            background-color: 
-        }}
-
-        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
-            background-color: {ModernStyle.SURFACE};
-            border: 2px solid {ModernStyle.BORDER};
-            border-radius: 6px;
-            padding: 8px 12px;
-            color: {ModernStyle.TEXT_PRIMARY};
-        }}
-
-        QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
-            border-color: {ModernStyle.PRIMARY};
-        }}
-
-        QTextEdit {{
-            background-color: {ModernStyle.SURFACE};
-            border: 2px solid {ModernStyle.BORDER};
-            border-radius: 6px;
-            padding: 8px;
-            color: {ModernStyle.TEXT_PRIMARY};
-        }}
-
-        QGroupBox {{
-            font-weight: bold;
-            border: 2px solid {ModernStyle.BORDER};
-            border-radius: 8px;
-            margin-top: 10px;
-            padding-top: 10px;
-        }}
-
-        QGroupBox::title {{
-            subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 8px 0 8px;
-            color: {ModernStyle.TEXT_PRIMARY};
-        }}
-
-        QLabel {{
-            color: {ModernStyle.TEXT_PRIMARY};
-        }}
-
-        QProgressBar {{
-            border: 2px solid {ModernStyle.BORDER};
-            border-radius: 6px;
-            text-align: center;
-            background-color: {ModernStyle.SURFACE};
-        }}
-
-        QProgressBar::chunk {{
-            background-color: {ModernStyle.PRIMARY};
-            border-radius: 4px;
-        }}
-
-        QCheckBox {{
-            color: {ModernStyle.TEXT_PRIMARY};
-            spacing: 8px;
-        }}
-
-        QCheckBox::indicator {{
-            width: 18px;
-            height: 18px;
-            border: 2px solid {ModernStyle.BORDER};
-            border-radius: 4px;
-            background-color: {ModernStyle.SURFACE};
-        }}
-
-        QCheckBox::indicator:checked {{
-            background-color: {ModernStyle.PRIMARY};
-            border-color: {ModernStyle.PRIMARY};
-        }}
-        
-        QCheckBox::indicator:disabled {{
-            background-color: {ModernStyle.SURFACE};
-            border-color: {ModernStyle.SURFACE};
-        }}
-
-        QScrollBar:vertical {{
-            background-color: {ModernStyle.SURFACE};
-            width: 12px;
-            border-radius: 6px;
-        }}
-
-        QScrollBar::handle:vertical {{
-            background-color: {ModernStyle.SURFACE_VARIANT};
-            border-radius: 6px;
-            min-height: 20px;
-        }}
-
-        QScrollBar::handle:vertical:hover {{
-            background-color: {ModernStyle.BORDER};
-        }}
-        """
-
+    """Colours for the inline styles left in dialogs; the same palette as ui_kit (the app stylesheet lives there)."""
+    BACKGROUND = "#161D25"
+    SURFACE = "#1C252F"
+    SURFACE_VARIANT = "#24303C"
+    PRIMARY = "#4B5866"
+    PRIMARY_VARIANT = "#5A6878"
+    SECONDARY = "#7FD1A8"
+    ERROR = "#FF7B72"
+    WARNING = "#F4A26B"
+    TEXT_PRIMARY = "#E6EBF0"
+    TEXT_SECONDARY = "#A9B4BF"
+    BORDER = "#2C3742"
 
 def _activity_color_for_days(days: Optional[float]) -> QColor:
     if days is None:
@@ -4194,6 +4029,276 @@ class _AutoActionsMonitorDialog(QDialog):
             self.table.setUpdatesEnabled(True)
 
 
+from bloxgen import (
+    BloxGenClient,
+    BloxGenError,
+    PLANS as BLOXGEN_PLANS,
+    allowed_types as bloxgen_allowed_types,
+    region_allowed as bloxgen_region_allowed,
+    cooldown_hint as bloxgen_cooldown_hint,
+    provision_account as bloxgen_provision_account,
+    globalize_cookie as bloxgen_globalize_cookie,
+)
+
+
+class BloxGenQueryWorker(QThread):
+    """One-shot balance/stock lookup, kept off the UI thread."""
+    done = Signal(str, object)   # kind, data
+    failed = Signal(str, str)    # kind, error message
+
+    def __init__(self, api_key: str, kind: str, parent=None):
+        super().__init__(parent)
+        self._api_key = api_key
+        self._kind = kind
+
+    def run(self):
+        try:
+            client = BloxGenClient(self._api_key)
+            data = client.balance() if self._kind == "balance" else client.stock()
+            self.done.emit(self._kind, data)
+        except Exception as e:
+            self.failed.emit(self._kind, str(e))
+
+
+class BloxGenCoordinator:
+    """Shared work counter so N per-key workers split one total between them.
+
+    Faster keys (or keys with shorter cooldowns) simply claim more slots.
+    """
+    def __init__(self, total: int):
+        self._lock = threading.Lock()
+        self._next = 0
+        self._total = int(total)
+        self._dead = set()      # account types that are out of stock / daily-capped
+        self._halt = False      # hard stop (e.g. insufficient balance)
+        self._shared_link = ""  # first good private-server link in this batch
+        self._shared_place = "" # its root place id
+
+    @property
+    def total(self) -> int:
+        return self._total
+
+    def share_private(self, link: str, place: str = "") -> None:
+        """Publish the first good private-server link so failed slots reuse it."""
+        with self._lock:
+            if link and not self._shared_link:
+                self._shared_link = str(link)
+                self._shared_place = str(place or "")
+
+    def shared_private(self):
+        """(link, place) of the batch's private server, ('','') if none yet."""
+        with self._lock:
+            return self._shared_link, self._shared_place
+
+    def claim(self):
+        """Return the next 1-based slot index, or None when done/halted."""
+        with self._lock:
+            if self._halt or self._next >= self._total:
+                return None
+            self._next += 1
+            return self._next
+
+    def refund(self):
+        """Give a claimed slot back (generation didn't produce an account)."""
+        with self._lock:
+            if self._next > 0:
+                self._next -= 1
+
+    def is_finished(self) -> bool:
+        """True once the target is met or a hard halt was requested."""
+        with self._lock:
+            return self._halt or self._next >= self._total
+
+    def is_dead(self, acc_type: str) -> bool:
+        with self._lock:
+            return acc_type in self._dead
+
+    def mark_dead(self, acc_type: str) -> None:
+        with self._lock:
+            self._dead.add(acc_type)
+
+    def halt(self) -> None:
+        with self._lock:
+            self._halt = True
+
+    def live_types(self, types):
+        with self._lock:
+            return [t for t in types if t not in self._dead]
+
+
+class GlobalizeListWorker(QThread):
+    """Globalize (re-home) each cookie in a list. Retries 3x, rate-limit friendly."""
+    log = Signal(str)
+    done = Signal(list)   # list of new cookies (successes only)
+
+    def __init__(self, cookies, out_path, parent=None):
+        super().__init__(parent)
+        self._cookies = list(cookies)
+        self._out_path = out_path
+
+    def run(self):
+        out = []
+        total = len(self._cookies)
+        for i, ck in enumerate(self._cookies, 1):
+            # globalize_cookie retries 3x internally (429/backoff/CSRF handled).
+            try:
+                new, err = bloxgen_globalize_cookie(ck)
+            except Exception as e:
+                new, err = ck, str(e)
+            if new and new != ck:            # new cookie issued -> success
+                out.append(new)
+                self.log.emit(f"[{i}/{total}] OK")
+            else:                            # returns original on failure
+                self.log.emit(f"[{i}/{total}] failed: {err or 'no change'}")
+            self.msleep(500)  # gap between accounts
+        try:
+            with open(self._out_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(out))
+        except Exception as e:
+            self.log.emit(f"write failed: {e}")
+        self.done.emit(out)
+
+
+class BloxGenWorker(QThread):
+    """One API key: pull slots from the coordinator, generate + provision each."""
+    log = Signal(str)
+    provisioned = Signal(object)     # {"generated": {...}, "prov": {...}, "add_disabled": bool}
+
+    def __init__(self, api_key, acc_types, region, universe_id, coordinator,
+                 add_disabled, plan="free", key_index=1, parent=None, globalize=False):
+        super().__init__(parent)
+        self._api_key = api_key
+        self._types = list(acc_types)
+        self._region = region
+        self._universe = universe_id
+        self._coord = coordinator
+        self._add_disabled = bool(add_disabled)
+        self._plan = plan
+        self._tag = f"key{key_index}"
+        self._ready_at = {}   # acc_type -> monotonic time it can next be generated
+        self._inherit_discord_ids = None  # optional: pings to copy onto added accounts
+        self._globalize = bool(globalize)  # refresh each cookie before storing
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def _pick_ready_type(self, now):
+        """Cooldowns are per-type, so prefer a type that's off cooldown right now.
+
+        Returns (type, None) if one is ready, (None, wake_time) if all live types
+        are cooling down, or (None, None) if no live types remain.
+        """
+        live = self._coord.live_types(self._types)
+        if not live:
+            return None, None
+        ready = [t for t in live if self._ready_at.get(t, 0.0) <= now]
+        if ready:
+            # earliest-ready first => the type idle longest goes next
+            return min(ready, key=lambda x: self._ready_at.get(x, 0.0)), None
+        return None, min(self._ready_at.get(t, 0.0) for t in live)
+
+    def run(self):
+        client = BloxGenClient(self._api_key)
+        total = self._coord.total
+        while not self._stop:
+            now = time.monotonic()
+            acc_type, wake = self._pick_ready_type(now)
+            if acc_type is None:
+                if wake is None:
+                    self.log.emit(f"[{self._tag}] No selected account types are available, stopping.")
+                    break
+                # Every live type is cooling down. Wait for the soonest, but bail
+                # the moment the run finishes elsewhere (another key hit the target)
+                # or Stop is pressed, so a long cooldown never stalls completion.
+                if self._coord.is_finished():
+                    break
+                while (not self._stop and not self._coord.is_finished()
+                       and time.monotonic() < wake):
+                    self.msleep(200)
+                continue
+
+            idx = self._coord.claim()
+            if idx is None:
+                break
+            prefix = f"[{self._tag} {idx}/{total}]"
+            try:
+                acc = client.generate(acc_type, self._region)
+            except BloxGenError as e:
+                msg = str(e).lower()
+                is_daily = "daily" in msg or "limit reached" in msg
+                if e.status == 429 and e.retry_after_ms > 0 and not is_daily:
+                    # per-type cooldown: park this type, free the slot, try another
+                    self._ready_at[acc_type] = time.monotonic() + e.retry_after_ms / 1000.0
+                    self._coord.refund()
+                    self.log.emit(f"{prefix} '{acc_type}' cooling {e.retry_after_ms // 1000}s, switching type.")
+                    continue
+                self._coord.refund()
+                if "insufficient balance" in msg:
+                    self.log.emit(f"{prefix} {e}. Halting all keys.")
+                    self._coord.halt()
+                    break
+                if e.status == 404 or "no accounts available" in msg or is_daily:
+                    self._coord.mark_dead(acc_type)
+                    self.log.emit(f"{prefix} '{acc_type}': {e}. Retiring this type.")
+                    continue
+                self.log.emit(f"{prefix} Generate failed: {e}")
+                continue
+            except Exception as e:
+                self._coord.refund()
+                self.log.emit(f"{prefix} Generate error: {e}")
+                continue
+
+            # Success: pre-seed this type's next-ready time from the plan table.
+            self._ready_at[acc_type] = time.monotonic() + max(1.0, bloxgen_cooldown_hint(self._plan, acc_type))
+            cookie = str(acc.get("cookie") or "")
+            if not cookie:
+                self.log.emit(f"{prefix} Response had no cookie, skipping.")
+                continue
+            label = str(acc.get("username") or acc.get("id") or "account")
+            # Optional: globalize (refresh) the cookie before provisioning/storing,
+            # so the account is saved with a fresh, warning-free .ROBLOSECURITY.
+            if self._globalize:
+                new_cookie, gerr = bloxgen_globalize_cookie(cookie)
+                if new_cookie and new_cookie != cookie:
+                    cookie = new_cookie
+                    acc["cookie"] = new_cookie  # stored downstream by _bloxgen_add_provisioned
+                    self.log.emit(f"{prefix} Globalized cookie for {label}.")
+                elif gerr:
+                    self.log.emit(f"{prefix} Globalize failed for {label} ({gerr}); keeping original cookie.")
+            self.log.emit(
+                f"{prefix} Generated {label} "
+                f"({acc.get('type')}, region {acc.get('region') or 'any'}). Provisioning..."
+            )
+            try:
+                prov = bloxgen_provision_account(cookie, self._universe, server_name="JARAM")
+            except BloxGenError as e:
+                self.log.emit(f"{prefix} {e}. Skipped.")
+                continue
+            except Exception as e:
+                self.log.emit(f"{prefix} Provision error: {e}. Skipped.")
+                continue
+            # Each account joins ONLY its own private server. Never share one
+            # account's VIP link across the batch: a Roblox VIP server admits
+            # only its owner + invited players, so a borrowed link fails with
+            # error 524 ("no permission to join this experience").
+            own_link = str(prov.get("private_server_link") or "")
+            # Private server required (universe set) but none after 3 retries: drop
+            # the account instead of adding it to a public server (public = constant
+            # kicks). provision_account already retried the VIP step 3x internally.
+            if self._universe and not own_link:
+                self.log.emit(
+                    f"{prefix} No private server after 3 tries "
+                    f"({prov.get('warning') or 'unknown error'}). Account dropped."
+                )
+                continue
+            if prov.get("warning"):
+                self.log.emit(f"{prefix} {prov['warning']}")
+            self.provisioned.emit({"generated": acc, "prov": prov, "add_disabled": self._add_disabled})
+        if self._stop:
+            self.log.emit(f"[{self._tag}] Stopped.")
+
+
 # Fishstrap/Bloxstrap non-fatal error popups (e.g. "Connectivity error" from a
 # 403 on Roblox's version check when many alts launch at once) sit open and need
 # a manual Close. Auto-dismiss them from the monitor loop.
@@ -4247,29 +4352,12 @@ def close_bootstrapper_error_dialogs() -> int:
     return closed
 
 
-class UpdateCheckThread(QThread):
-    """Ask GitHub whether a newer release exists. Never blocks the UI.
-
-    Emits found(tag, url) only when there is genuinely something newer;
-    stays silent on no network, rate limiting, or an unparseable tag.
-    """
-    found = Signal(str, str)
-
-    def run(self):
-        try:
-            from version import check_for_update
-            rel = check_for_update()
-            if rel:
-                self.found.emit(rel["tag"], rel["url"])
-        except Exception:
-            pass
-
-
 class WorkerThread(QThread):
     log_signal     = Signal(str)
     status_signal  = Signal(object)
     process_signal = Signal(object)
     multiscope_signal = Signal(object)   # drives the Multiscope tab
+    bloxgen_replace_signal = Signal(str)  # uid, emitted when an account newly flags bad/CAP
     merchant_signal = Signal(str, str)   # uid, merchant for Auto-Actions triggers
     ready_signal = Signal()
 
@@ -5884,6 +5972,7 @@ class WorkerThread(QThread):
         total_users = len(source_items)
         flagged_count = sum(1 for _uid, info in source_items if info.get("bad", False) or info.get("cap", False))
         disabled_count = sum(1 for _uid, info in source_items if info.get("disabled", False))
+        backup_count = sum(1 for _uid, info in source_items if info.get("backup", False))
 
         good_sorted = [
             str(uid)
@@ -5891,6 +5980,7 @@ class WorkerThread(QThread):
             if isinstance(info, dict)
             and not (info.get("bad", False) or info.get("cap", False))
             and not info.get("disabled", False)
+            and not info.get("backup", False)  # reserve stays out of the launch pool until promoted
         ]
 
         if self.spares_mode:
@@ -6312,7 +6402,6 @@ class WorkerThread(QThread):
             jester_ping=ms_cfg.get("jester_ping", ""),
             mari_ping=ms_cfg.get("mari_ping", ""),
             rin_ping=ms_cfg.get("rin_ping", ""),
-            merchant_detection_mode=ms_cfg.get("merchant_detection_mode", "asset_id"),
             disable_log_based_merchant_detection=_should_disable_log_based_merchant_detection(cfg),
             merchant_rate_limit=float(ms_cfg.get("merchant_rate_limit", 15)),
             biome_min_interval=float(ms_cfg.get("biome_min_interval", 2)),
@@ -6323,6 +6412,7 @@ class WorkerThread(QThread):
                 )
             ),
             player_tracker_hook=ms_cfg.get("player_tracker_webhook", ""),
+            sinister_hook=ms_cfg.get("sinister_webhook", ""),
             in_menu_none_timeout_seconds=cap_watchdog_cfg["in_menu_none_timeout_seconds"],
         )
 
@@ -6965,6 +7055,14 @@ class WorkerThread(QThread):
                         new_cap = bool(new_info.get("cap", False))
                         new_flagged = new_bad or new_cap
 
+                        # Newly flagged (bad or CAP): let the GUI decide whether to
+                        # auto-replace this account via BloxGen.
+                        if new_flagged and not old_flagged:
+                            try:
+                                self.bloxgen_replace_signal.emit(str(uid))
+                            except Exception:
+                                pass
+
                         # If newly disabled, terminate any live processes now so it stays off.
                         if new_disabled and not old_disabled:
                             try:
@@ -7590,6 +7688,12 @@ class WorkerThread(QThread):
                                 st["requires_restart"] = not cap_triggered
                                 st["inactive_since"]   = None
                                 st["status"]           = "Offline"
+                            elif kind == "webhook_rate_limited":
+                                # Multiscope (child process) hit a 429: run the GUI's notice hook.
+                                try:
+                                    webhook_gate._tell_rate_limited(*json.loads(payload))
+                                except Exception:
+                                    pass
                             elif kind == "webhook_failed":
                                 # Engine exhausted retries on a biome webhook send.
                                 # Post an error embed to the CAP/alert webhook so
@@ -7608,7 +7712,7 @@ class WorkerThread(QThread):
                                     }
                                     def _post_alert(u=alert_url, e=embed):
                                         try:
-                                            requests.post(u, json={"embeds": [e]}, timeout=8)
+                                            webhook_gate.post(u, json={"embeds": [e]}, timeout=8)
                                         except Exception:
                                             pass
                                     try:
@@ -7974,2775 +8078,6 @@ class WorkerThread(QThread):
         except Exception:
             pass
 
-class UserManagementDialogLegacy(QDialog):
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("User Account Management")
-        self.setModal(True)
-
-        self.resize(1400, 850)
-        self.setMinimumSize(1200, 700)
-        self.config_manager = ConfigManager()
-        self.cookie_extractor = CookieExtractor(self)
-        self.skip_account_private_link_warning = False
-        self.skip_account_public_place_warning = False
-        self._settings_baseline: Optional[dict] = None
-        self._settings_prompt_ready = False
-        self._tab_change_guard = False
-        self._last_tab_index: Optional[int] = None
-        self._settings_label_map = {
-            "window_limit": "Window Limit",
-            "spares_mode": "Spares Mode",
-            "spares_fraction": "Spare Mode Split",
-            "roblox_window_geometry.enforce_on_launch": "Auto-fix Roblox Window Geometry",
-            "roblox_window_geometry.x": "Roblox Window X",
-            "roblox_window_geometry.y": "Roblox Window Y",
-            "roblox_window_geometry.w": "Roblox Window Width",
-            "roblox_window_geometry.h": "Roblox Window Height",
-            "timeouts.offline": "Restart Inactive After",
-            "timeouts.initial_delay": "Initial Launch Delay",
-            "timeouts.launch_delay": "Launch Delay",
-            "timeouts.strap_threshold": "Strap Limit",
-            "timeouts.handoff_lead": "Handoff Lead",
-            "timeouts.early_join_window": "Early-Join Window",
-            "timeout_monitor.kill_enabled": "Kill After Enabled",
-            "timeout_monitor.kill_timeout": "Kill After",
-            "timeout_monitor.poll_interval": "Poll Interval",
-            "cap_watchdog.missing_username_increments_cap": "No Username Increases CAP Counter",
-            "cap_watchdog.missing_username_timeout_seconds": "No-Username Timeout",
-            "cap_watchdog.in_menu_none_increments_cap": "In-Menu None Increases CAP Counter",
-            "cap_watchdog.in_menu_none_timeout_seconds": "In-Menu None Timeout",
-            "cap_watchdog.cap_counter_limit": "CAP Counter Limit",
-            "alerts.webhook_url": "Webhook URL",
-            "alerts.blackout_ping": "Blackout Ping",
-            "alerts.cap_message": "CAP Message",
-            "alerts.bad_message": "BAD Message",
-            "alerts.hourly_users_report_enabled": "Hourly Users Report",
-            "alerts.hourly_users_report_interval_hours": "Hourly Users Report Interval",
-            "webhooks": "Webhooks",
-            "ui.webhooks_hidden_biomes": "Hidden Webhook Biome Columns",
-            "ui.show_tutorial_menu": "Show Tutorial Menu Item",
-            "misc.skip_webhook_unknown_context": "Skip Unknown-Context Webhooks",
-            "misc.log_confirmed_launch_mode": "Launch Next After Log Confirm",
-            "misc.bes_wait_for_username_in_logs": "Wait for BES Username Log",
-            "misc.disable_manager_bad_marking": "Disable Manager BAD Marking",
-            "misc.msedgewebview2_limiter_enabled": "Enable msedgewebview2 Limiter",
-            "misc.hide_discord_tabs": "Hide Discord Tab",
-            "misc.close_bootstrapper_error_popups": "Auto-Close Bootstrapper Error Popups",
-            "multiscope.merchant_webhook": "Merchant Webhook URL",
-            "multiscope.merchant_detection_mode": "Merchant Detection Mode",
-            "multiscope.enable_jester": "Enable Jester Pings",
-            "multiscope.enable_mari": "Enable Mari Pings",
-            "multiscope.enable_rin": "Enable Rin Pings",
-            "multiscope.jester_ping_type": "Jester Ping Type",
-            "multiscope.jester_ping_id": "Jester Ping ID",
-            "multiscope.mari_ping_type": "Mari Ping Type",
-            "multiscope.mari_ping_id": "Mari Ping ID",
-            "multiscope.rin_ping_type": "Rin Ping Type",
-            "multiscope.rin_ping_id": "Rin Ping ID",
-            "misc.disable_log_based_merchant_detection_when_ocr_merchants_enabled": "Disable Log Merchant Detection While OCR Merchants Active",
-        }
-        self.selected_user_id = None
-        self.setup_ui()
-        self.load_users()
-        self.skip_private_server_warning = False      # session-only
-
-
-    def setup_ui(self):
-        main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-
-        main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_splitter.setChildrenCollapsible(False)
-
-        left_panel = self._create_user_list_panel()
-        main_splitter.addWidget(left_panel)
-
-        right_panel = self._create_user_form_panel()
-        main_splitter.addWidget(right_panel)
-
-        main_splitter.setSizes([980, 420])
-        main_layout.addWidget(main_splitter)
-
-        controls_layout = self._create_controls_layout()
-        main_layout.addLayout(controls_layout)
-
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        button_box.accepted.connect(self.save_and_close)
-        button_box.rejected.connect(self.reject)
-        main_layout.addWidget(button_box)
-
-    def _create_user_list_panel(self):
-        panel = QWidget()
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(0, 0, 10, 0)
-
-        header_label = QLabel("User Accounts")
-        header_label.setStyleSheet(f"""
-            QLabel {{
-                font-size: 16px;
-                font-weight: bold;
-                color: {ModernStyle.TEXT_PRIMARY};
-                padding: 10px 0;
-                border-bottom: 2px solid {ModernStyle.PRIMARY};
-            }}
-        """)
-        panel_layout.addWidget(header_label)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setStyleSheet(f"""
-            QScrollArea {{
-                border: 1px solid {ModernStyle.BORDER};
-                border-radius: 8px;
-                background-color: {ModernStyle.SURFACE};
-            }}
-        """)
-
-        self.user_list_widget = QWidget()
-        self.user_list_layout = QVBoxLayout(self.user_list_widget)
-        self.user_list_layout.setSpacing(8)
-        self.user_list_layout.setContentsMargins(15, 15, 15, 15)
-
-        scroll_area.setWidget(self.user_list_widget)
-        panel_layout.addWidget(scroll_area)
-
-        return panel
-
-    def _create_user_form_panel(self):
-        panel = QWidget()
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(10, 0, 0, 0)
-
-        self.form_header = QLabel("Add New User")
-        self.form_header.setStyleSheet(f"""
-            QLabel {{
-                font-size: 16px;
-                font-weight: bold;
-                color: {ModernStyle.TEXT_PRIMARY};
-                padding: 10px 0;
-                border-bottom: 2px solid {ModernStyle.SECONDARY};
-            }}
-        """)
-        panel_layout.addWidget(self.form_header)
-
-        form_container = QWidget()
-        form_container.setStyleSheet(f"""
-            QWidget {{
-                background-color: {ModernStyle.BACKGROUND};
-                border: 1px solid {ModernStyle.SURFACE};
-                border-radius: 8px;
-                padding: 15px;
-            }}
-        """)
-        form_layout = QVBoxLayout(form_container)
-        form_layout.setSpacing(12)
-
-        self.user_id_input = QLineEdit()
-        self.user_id_input.setPlaceholderText("Enter user ID (e.g., 123456789)")
-        self.user_id_input.setStyleSheet(self._get_input_style())
-        form_layout.addWidget(QLabel("User ID:"))
-        form_layout.addWidget(self.user_id_input)
-
-        self.username_input = QLineEdit()
-        self.username_input.setPlaceholderText("Enter username (e.g., PlayerName)")
-        self.username_input.setStyleSheet(self._get_input_style())
-        form_layout.addWidget(QLabel("Username:"))
-        form_layout.addWidget(self.username_input)
-
-        self.private_server_input = QLineEdit()
-        self.private_server_input.setPlaceholderText("Enter private server link (recommended)")
-        self.private_server_input.setStyleSheet(self._get_input_style())
-        form_layout.addWidget(QLabel("Private Server Link:"))
-        form_layout.addWidget(self.private_server_input)
-
-        self.place_input = QLineEdit()
-        self.place_input.setPlaceholderText("Enter place ID")
-        self.place_input.setStyleSheet(self._get_input_style())
-        form_layout.addWidget(QLabel("Place:"))
-        form_layout.addWidget(self.place_input)
-
-        form_layout.addWidget(QLabel("Cookie:"))
-        cookie_layout = QHBoxLayout()
-        self.cookie_input = QLineEdit()
-        self.cookie_input.setPlaceholderText("Enter .ROBLOSECURITY cookie")
-        self.cookie_input.setStyleSheet(self._get_input_style())
-        cookie_layout.addWidget(self.cookie_input)
-
-        self.browser_login_btn = QPushButton("Login with Browser")
-        self.browser_login_btn.setStyleSheet(self._get_secondary_button_style())
-        self.browser_login_btn.setToolTip("Open browser to login and automatically extract cookie")
-        self.browser_login_btn.clicked.connect(self.extract_cookie_from_browser)
-        cookie_layout.addWidget(self.browser_login_btn)
-        form_layout.addLayout(cookie_layout)
-
-        button_layout = QHBoxLayout()
-        self.add_btn = QPushButton("Add User")
-        self.add_btn.setStyleSheet(self._get_primary_button_style())
-        self.add_btn.clicked.connect(self.add_user)
-        button_layout.addWidget(self.add_btn)
-
-        self.update_btn = QPushButton("Update User")
-        self.update_btn.setStyleSheet(self._get_primary_button_style())
-        self.update_btn.clicked.connect(self.update_user)
-        self.update_btn.hide()  
-        button_layout.addWidget(self.update_btn)
-
-        self.cancel_edit_btn = QPushButton("Cancel Edit")
-        self.cancel_edit_btn.setStyleSheet(self._get_secondary_button_style())
-        self.cancel_edit_btn.clicked.connect(self.cancel_edit)
-        self.cancel_edit_btn.hide()  
-        button_layout.addWidget(self.cancel_edit_btn)
-
-        form_layout.addLayout(button_layout)
-        panel_layout.addWidget(form_container)
-        panel_layout.addStretch()
-
-        return panel
-
-    def _create_controls_layout(self):
-        controls_layout = QHBoxLayout()
-
-        refresh_btn = QPushButton("Refresh List")
-        refresh_btn.setStyleSheet(self._get_secondary_button_style())
-        refresh_btn.clicked.connect(self.refresh_user_list)
-        controls_layout.addWidget(refresh_btn)
-
-        controls_layout.addStretch()
-
-        return controls_layout
-
-    def _get_input_style(self):
-        return f"""
-            QLineEdit {{
-                background-color: {ModernStyle.SURFACE};
-                border: 2px solid {ModernStyle.BORDER};
-                border-radius: 6px;
-                padding: 10px 12px;
-                color: {ModernStyle.TEXT_PRIMARY};
-                font-size: 13px;
-                min-height: 20px;
-            }}
-            QLineEdit:focus {{
-                border-color: {ModernStyle.PRIMARY};
-            }}
-        """
-
-    def _get_primary_button_style(self):
-        return f"""
-            QPushButton {{
-                background-color: {ModernStyle.PRIMARY};
-                color: {ModernStyle.TEXT_PRIMARY};
-                border: none;
-                padding: 10px 20px;
-                border-radius: 6px;
-                font-weight: 600;
-                font-size: 13px;
-                min-height: 20px;
-                min-width: 100px;
-            }}
-            QPushButton:hover {{
-                background-color: {ModernStyle.PRIMARY_VARIANT};
-            }}
-            QPushButton:pressed {{
-                background-color: 
-            }}
-        """
-
-    def _get_secondary_button_style(self):
-        return f"""
-            QPushButton {{
-                background-color: {ModernStyle.SURFACE_VARIANT};
-                color: {ModernStyle.TEXT_PRIMARY};
-                border: 1px solid {ModernStyle.BORDER};
-                padding: 10px 20px;
-                border-radius: 6px;
-                font-weight: 500;
-                font-size: 13px;
-                min-height: 20px;
-                min-width: 100px;
-            }}
-            QPushButton:hover {{
-                background-color: {ModernStyle.BORDER};
-            }}
-        """
-
-    def _get_action_button_style(self, color_type="primary"):
-        if color_type == "danger":
-            bg_color = ModernStyle.ERROR
-            hover_color = "#dc2626"
-            pressed_color = "#b91c1c"
-        else:
-            bg_color = ModernStyle.PRIMARY
-            hover_color = ModernStyle.PRIMARY_VARIANT
-            pressed_color = "#3730a3"
-
-        return f"""
-            QPushButton {{
-                background-color: {bg_color};
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: 600;
-                font-size: 12px;
-                min-width: 70px;
-                max-width: 80px;
-                min-height: 30px;
-                max-height: 32px;
-            }}
-            QPushButton:hover {{
-                background-color: {hover_color};
-            }}
-            QPushButton:pressed {{
-                background-color: {pressed_color};
-            }}
-        """
-
-    def load_users(self):
-        try:
-            self.original_config = self.config_manager.load_users()
-            self.refresh_user_list()
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to load users: {e}")
-            self.original_config = {}
-            self.refresh_user_list()
-
-    def refresh_user_list(self):
-
-        for i in reversed(range(self.user_list_layout.count())):
-            child = self.user_list_layout.itemAt(i).widget()
-            if child:
-                child.setParent(None)
-
-        for user_id, user_info in self.original_config.items():
-            user_card = self._create_user_card(user_id, user_info)
-            self.user_list_layout.addWidget(user_card)
-
-        self.user_list_layout.addStretch()
-
-    def _create_user_card(self, user_id, user_info):
-        card = QWidget()
-        card.setStyleSheet(f"""
-            QWidget {{
-                background-color: {ModernStyle.SURFACE_VARIANT};
-                border: 1px solid {ModernStyle.BORDER};
-                border-radius: 8px;
-                padding: 12px;
-                margin: 2px;
-            }}
-            QWidget:hover {{
-                border-color: {ModernStyle.PRIMARY};
-                background-color: {ModernStyle.SURFACE};
-            }}
-        """)
-
-        card.setMinimumHeight(100)
-        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-
-        layout = QVBoxLayout(card)
-        layout.setSpacing(6)
-        layout.setContentsMargins(8, 8, 8, 8)
-
-        if isinstance(user_info, dict):
-            username = user_info.get("username", f"User_{user_id}")
-            private_server_link = user_info.get("private_server_link", "")
-            place = user_info.get("place", "")
-            cookie = user_info.get("cookie", "")
-        else:
-            username = f"User_{user_id}"
-            private_server_link = ""
-            place = ""
-            cookie = user_info
-
-        header_layout = QVBoxLayout()
-        header_layout.setSpacing(2)
-
-        user_id_label = QLabel(f"ID: {user_id}")
-        user_id_label.setStyleSheet(f"""
-            QLabel {{
-                font-weight: bold;
-                font-size: 14px;
-                color: {ModernStyle.PRIMARY};
-                margin: 0px;
-                padding: 0px;
-            }}
-        """)
-        user_id_label.setWordWrap(True)
-        header_layout.addWidget(user_id_label)
-
-        username_label = QLabel(f"User: {username}")
-        username_label.setStyleSheet(f"""
-            QLabel {{
-                font-size: 12px;
-                color: {ModernStyle.TEXT_PRIMARY};
-                font-weight: 500;
-                margin: 0px;
-                padding: 0px;
-            }}
-        """)
-        username_label.setWordWrap(True)
-        header_layout.addWidget(username_label)
-
-        layout.addLayout(header_layout)
-
-        info_layout = QVBoxLayout()
-        info_layout.setSpacing(2)
-
-        if place:
-            place_label = QLabel(f"Place: {place}")
-            place_label.setStyleSheet(f"""
-                QLabel {{
-                    color: {ModernStyle.TEXT_SECONDARY};
-                    font-size: 11px;
-                    margin: 0px;
-                    padding: 0px;
-                }}
-            """)
-            place_label.setWordWrap(True)
-            info_layout.addWidget(place_label)
-
-        if private_server_link:
-
-            if "roblox.com/share" in private_server_link:
-                server_text = "Share Link: " + private_server_link.split("?")[1][:25] + "..."
-            elif len(private_server_link) > 35:
-                server_text = "Server: " + private_server_link[:35] + "..."
-            else:
-                server_text = f"Server: {private_server_link}"
-
-            server_label = QLabel(server_text)
-            server_label.setStyleSheet(f"""
-                QLabel {{
-                    color: {ModernStyle.TEXT_SECONDARY};
-                    font-size: 11px;
-                    margin: 0px;
-                    padding: 0px;
-                }}
-            """)
-            server_label.setWordWrap(True)
-            server_label.setToolTip(private_server_link)  
-            info_layout.addWidget(server_label)
-
-        layout.addLayout(info_layout)
-
-        button_layout = QHBoxLayout()
-        button_layout.setSpacing(6)
-        button_layout.setContentsMargins(0, 4, 0, 0)
-
-        edit_btn = QPushButton("Edit")
-        edit_btn.setStyleSheet(self._get_action_button_style("primary"))
-        edit_btn.clicked.connect(lambda: self.edit_user_card(user_id))
-        button_layout.addWidget(edit_btn)
-
-        delete_btn = QPushButton("Delete")
-        delete_btn.setStyleSheet(self._get_action_button_style("danger"))
-        delete_btn.clicked.connect(lambda: self.delete_user_by_id(user_id))
-        button_layout.addWidget(delete_btn)
-
-        button_layout.addStretch()
-        layout.addLayout(button_layout)
-
-        return card
-
-    def edit_user_card(self, user_id):
-        if user_id not in self.original_config:
-            QMessageBox.warning(self, "Error", f"User {user_id} not found!")
-            return
-
-        self.selected_user_id = user_id
-        self.form_header.setText(f"Edit User {user_id}")
-
-        user_info = self.original_config[user_id]
-        if isinstance(user_info, dict):
-            self.user_id_input.setText(user_id)
-            self.user_id_input.setEnabled(False)  
-            self.username_input.setText(user_info.get("username", f"User_{user_id}"))
-            self.private_server_input.setText(user_info.get("private_server_link", ""))
-            self.place_input.setText(user_info.get("place", ""))
-            self.cookie_input.setText(user_info.get("cookie", ""))
-        else:
-            self.user_id_input.setText(user_id)
-            self.user_id_input.setEnabled(False)
-            self.username_input.setText(f"User_{user_id}")
-            self.private_server_input.setText("")
-            self.place_input.setText("")
-            self.cookie_input.setText(user_info)
-
-        self.add_btn.hide()
-        self.update_btn.show()
-        self.cancel_edit_btn.show()
-
-    def cancel_edit(self):
-        self.selected_user_id = None
-        self.form_header.setText("Add New User")
-
-        self.user_id_input.clear()
-        self.user_id_input.setEnabled(True)
-        self.username_input.clear()
-        self.private_server_input.clear()
-        self.place_input.clear()
-        self.cookie_input.clear()
-
-        self.add_btn.show()
-        self.update_btn.hide()
-        self.cancel_edit_btn.hide()
-
-    def update_user(self):
-        if not self.selected_user_id:
-            return
-
-        user_id = self.selected_user_id
-        username = self.username_input.text().strip()
-        private_server_link = self.private_server_input.text().strip()
-        place = self.place_input.text().strip()
-        cookie = self.cookie_input.text().strip()
-
-        cookie_raw = cookie
-        if normalize_roblosecurity_cookie_value is not None:
-            try:
-                cookie = normalize_roblosecurity_cookie_value(cookie)
-            except Exception:
-                cookie = str(cookie or "").strip()
-            if cookie and cookie != cookie_raw:
-                try:
-                    self.cookie_input.setText(cookie)
-                except Exception:
-                    pass
-
-        if not username:
-            username = f"User_{user_id}"
-
-        if not private_server_link:
-            if not self._confirm_missing_ps_link():
-                self.private_server_input.setFocus()
-                return
-
-
-        if not cookie:
-            QMessageBox.warning(self, "Error", "Cookie cannot be empty!")
-            self.cookie_input.setFocus()
-            return
-
-        existing = self.original_config.get(user_id, {})
-        if not isinstance(existing, dict):
-            existing = {}
-
-        self.original_config[user_id] = {
-            "username": username,
-            "private_server_link": private_server_link,
-            "place": place,
-            "cookie": cookie,
-            "bad": False,
-            "cap": False,
-            "launch_priority": coerce_launch_priority(existing.get("launch_priority", DEFAULT_LAUNCH_PRIORITY)),
-            "discord_user_ids": normalize_discord_ids(existing.get("discord_user_ids")),
-        }
-
-        self.refresh_user_list()
-        self.cancel_edit()
-        QMessageBox.information(self, "Success", f"User {user_id} ({username}) updated successfully!")
-
-    def _confirm_missing_ps_link(self) -> bool:
-        """Return True to proceed with save, False to cancel."""
-        if self.skip_private_server_warning:
-            return True
-
-        box = QMessageBox(self)
-        box.setWindowTitle("No Private Server Link")
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setText(
-            "You didn’t enter a Private Server Link.\n\n"
-            "If you continue, the account will launch into a public server "
-            "using ‘Place:’ (or Sols RNG public lobby if that's missing as well)."
-        )
-        box.setInformativeText("Save anyway?")
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(QMessageBox.StandardButton.Yes)
-
-        chk = QCheckBox("Don’t warn me again")
-        box.setCheckBox(chk)
-
-        decision = box.exec() == QMessageBox.StandardButton.Yes
-        if decision and chk.isChecked():
-            self.skip_private_server_warning = True   # remember only for this run
-        return decision
-
-    def add_user(self):
-        user_id = self.user_id_input.text().strip()
-        username = self.username_input.text().strip()
-        private_server_link = self.private_server_input.text().strip()
-        place = self.place_input.text().strip()
-        cookie = self.cookie_input.text().strip()
-
-        if not user_id:
-            QMessageBox.warning(self, "Error", "Please enter a User ID")
-            self.user_id_input.setFocus()
-            return
-
-        if not user_id.isdigit():
-            QMessageBox.warning(self, "Error", "User ID should be numeric (e.g., 123456789)")
-            self.user_id_input.setFocus()
-            return
-
-        if user_id in self.original_config:
-            QMessageBox.warning(self, "Error", f"User ID {user_id} already exists. Use Edit to modify existing users.")
-            self.user_id_input.setFocus()
-            return
-
-        if not private_server_link:
-            if not self._confirm_missing_ps_link():
-                self.private_server_input.setFocus()
-                return
-
-        if not cookie:
-            QMessageBox.warning(self, "Error", "Please enter a Cookie")
-            self.cookie_input.setFocus()
-            return
-
-        cookie_raw = cookie
-        if normalize_roblosecurity_cookie_value is not None:
-            try:
-                cookie = normalize_roblosecurity_cookie_value(cookie)
-            except Exception:
-                cookie = str(cookie or "").strip()
-            if cookie and cookie != cookie_raw:
-                try:
-                    self.cookie_input.setText(cookie)
-                except Exception:
-                    pass
-
-        if not username:
-            username = f"User_{user_id}"
-
-        import re
-        pattern1 = r'roblox\.com/games/\d+/[^?]*\?privateServerLinkCode=[A-Za-z0-9_-]+'
-        pattern2 = r'roblox\.com/share\?code=[A-Za-z0-9_-]+&type=Server'
-
-        if not (re.search(pattern1, private_server_link) or re.search(pattern2, private_server_link)):
-            reply = QMessageBox.question(self, "Private Server Link Warning",
-                                       "The private server link doesn't appear to be in the expected format.\n\n"
-                                       "Supported formats:\n"
-                                       "• Direct Link: https://www.roblox.com/games/[ID]/[NAME]?privateServerLinkCode=[CODE]\n"
-                                       "• Share Link: https://www.roblox.com/share?code=[CODE]&type=Server\n\n"
-                                       "Continue anyway?",
-                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.No:
-                self.private_server_input.setFocus()
-                return
-
-        should_warn_cookie = False
-        try:
-            if is_probably_roblosecurity is not None:
-                should_warn_cookie = not bool(is_probably_roblosecurity(cookie))
-            else:
-                should_warn_cookie = not bool(str(cookie or "").strip())
-        except Exception:
-            should_warn_cookie = True
-
-        if should_warn_cookie:
-            reply = QMessageBox.question(self, "Cookie Warning",
-                                       "The cookie doesn't appear to be a valid .ROBLOSECURITY value. Continue anyway?",
-                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.No:
-                self.cookie_input.setFocus()
-                return
-
-        try:
-
-            self.original_config[user_id] = {
-                "username": username,
-                "private_server_link": private_server_link,
-                "place": place,
-                "cookie": cookie,
-                "bad": False,
-                "cap": False,
-                "launch_priority": DEFAULT_LAUNCH_PRIORITY,
-                "discord_user_ids": [],
-            }
-
-            self.user_id_input.clear()
-            self.username_input.clear()
-            self.private_server_input.clear()
-            self.place_input.clear()
-            self.cookie_input.clear()
-
-            self.refresh_user_list()
-
-            QMessageBox.information(self, "Success", f"User {user_id} ({username}) added successfully!")
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to add user: {e}")
-
-    def extract_cookie_from_browser(self):
-        try:
-            self.browser_login_btn.setEnabled(False)
-            self.browser_login_btn.setText("Extracting...")
-
-            self.cookie_extractor.extract_cookie_async(
-                callback=self._on_cookie_extraction_complete,
-                parent_widget=self
-            )
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to start cookie extraction: {str(e)}")
-            self._reset_browser_button()
-
-    def _fetch_authenticated_user(self, cookie: str) -> Tuple[Optional[dict], str]:
-        cookie = str(cookie or "").strip()
-        if normalize_roblosecurity_cookie_value is not None:
-            try:
-                cookie = normalize_roblosecurity_cookie_value(cookie)
-            except Exception:
-                cookie = str(cookie or "").strip()
-        if not cookie:
-            return None, cookie
-        try:
-            session = requests.Session()
-            try:
-                session.cookies.set(".ROBLOSECURITY", cookie, domain=".roblox.com", path="/")
-            except Exception:
-                session.cookies.set(".ROBLOSECURITY", cookie)
-
-            response = session.get("https://users.roblox.com/v1/users/authenticated", timeout=8)
-            if extract_roblosecurity_from_requests_response is not None:
-                try:
-                    updated = extract_roblosecurity_from_requests_response(response, session=session)
-                except Exception:
-                    updated = None
-                if updated and updated != cookie:
-                    cookie = updated
-
-            if response.status_code != 200:
-                return None, cookie
-            data = response.json()
-            if not isinstance(data, dict):
-                return None, cookie
-            if "id" not in data or "name" not in data:
-                return None, cookie
-            return data, cookie
-        except Exception:
-            return None, cookie
-
-    def _on_cookie_extraction_complete(self, cookie: str):
-        try:
-            if cookie:
-                self.cookie_input.setText(cookie)
-                user_info, updated_cookie = self._fetch_authenticated_user(cookie)
-                if updated_cookie and updated_cookie != cookie:
-                    cookie = updated_cookie
-                    self.cookie_input.setText(cookie)
-                extra = ""
-                if user_info:
-                    self.user_id_input.setText(str(user_info.get("id", "")))
-                    self.username_input.setText(str(user_info.get("name", "")))
-                    extra = f"\n\nUser info filled: {user_info.get('name', '')} ({user_info.get('id', '')})"
-                else:
-                    extra = "\n\nCould not fetch user info; you can enter it manually."
-                QMessageBox.information(self, "Success",
-                                      "Cookie extracted successfully!\n\n"
-                                      "The cookie has been automatically filled in the input field."
-                                      f"{extra}")
-            else:
-                QMessageBox.information(self, "Extraction Cancelled",
-                                      "Cookie extraction was cancelled or failed.\n\n"
-                                      "You can try again or enter the cookie manually.")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error handling extracted cookie: {str(e)}")
-        finally:
-            self._reset_browser_button()
-
-    def _reset_browser_button(self):
-        self.browser_login_btn.setEnabled(True)
-        self.browser_login_btn.setText("Login with Browser")
-
-    def delete_user_by_id(self, user_id):
-        user_info = self.original_config.get(user_id, {})
-        if isinstance(user_info, dict):
-            username = user_info.get("username", f"User_{user_id}")
-        else:
-            username = f"User_{user_id}"
-
-        reply = QMessageBox.question(self, "Confirm Delete",
-                                   f"Are you sure you want to delete user {user_id} ({username})?\n\n"
-                                   f"This action cannot be undone.",
-                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-
-        if reply == QMessageBox.StandardButton.Yes:
-            if user_id in self.original_config:
-
-                if self.selected_user_id == user_id:
-                    self.cancel_edit()
-
-                del self.original_config[user_id]
-                self.refresh_user_list()
-                QMessageBox.information(self, "Success", f"User {user_id} ({username}) deleted successfully!")
-            else:
-                QMessageBox.warning(self, "Error", f"User {user_id} not found in configuration!")
-
-    def save_and_close(self):
-        if self.config_manager.save_users(self.original_config):
-            config_info = self.config_manager.get_config_info()
-            QMessageBox.information(self, "Success",
-                                  f"User configuration saved successfully!\n\n"
-                                  f"Location: {config_info['users_file']}\n"
-                                  f"Backup created in: {config_info['backup_dir']}")
-            self.accept()
-        else:
-            QMessageBox.critical(self, "Error",
-                               "Failed to save user configuration. Please check the logs for details.")
-
-
-class UserManagementDialog(QDialog):
-    """
-    Launcher-focused Manage Users dialog.
-
-    - Multi-select users and launch Roblox (PS/share link, else public lobby).
-    - Open a logged-in browser by injecting the user's .ROBLOSECURITY cookie.
-    - Basic add/edit/delete still available.
-    """
-
-    # Keep Selenium drivers alive so Chrome windows don't auto-close.
-    _browser_driver_keepalive: list = []
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Manage Users")
-        self.setModal(True)
-
-        self.resize(1400, 850)
-        self.setMinimumSize(1200, 700)
-
-        self.config_manager = ConfigManager()
-        self.cookie_extractor = CookieExtractor(self)
-
-        self.original_config: dict[str, dict] = {}
-        self.selected_user_id: Optional[str] = None
-        self._bulk_delete_mode = False
-
-        # For manager-off launches
-        self._manual_manager: Optional[RobloxManager] = None
-        self._manual_process_mgr: Optional[ProcessManager] = None
-        self._manual_launcher: Optional[GameLauncher] = None
-
-        self._build_ui()
-        self.load_users()
-
-    def _build_ui(self) -> None:
-        main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(8)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-
-        search_row = QHBoxLayout()
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search by user ID / username...")
-        self.search_input.textChanged.connect(self.refresh_user_list)
-        search_row.addWidget(self.search_input, 1)
-
-        self.selected_count_label = QLabel("Selected: 0")
-        self.selected_count_label.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        search_row.addWidget(self.selected_count_label)
-
-        self.refresh_btn = QPushButton("Reload")
-        self.refresh_btn.clicked.connect(self.load_users)
-        search_row.addWidget(self.refresh_btn)
-
-        self.bulk_delete_mode_btn = QPushButton("Bulk Delete")
-        self.bulk_delete_mode_btn.setProperty("class", "danger")
-        self.bulk_delete_mode_btn.clicked.connect(self._toggle_bulk_delete_mode)
-        search_row.addWidget(self.bulk_delete_mode_btn)
-        main_layout.addLayout(search_row)
-
-        self.content_stack = QStackedWidget()
-
-        manage_page = QWidget()
-        manage_layout = QVBoxLayout(manage_page)
-        manage_layout.setContentsMargins(0, 0, 0, 0)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-
-        # Left: table
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 8, 0)
-
-        self.users_table = QTableWidget()
-        self.users_table.setColumnCount(5)
-        self.users_table.setHorizontalHeaderLabels([
-            "User ID",
-            "Username",
-            "Mode",
-            "Link / Place",
-            "Description",
-        ])
-        try:
-            self.users_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-            self.users_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        except Exception:
-            pass
-        self.users_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.users_table.verticalHeader().setVisible(False)
-        self.users_table.setAlternatingRowColors(True)
-        self.users_table.itemSelectionChanged.connect(self._on_table_selection_changed)
-        self.users_table.cellDoubleClicked.connect(self._on_table_double_clicked)
-        self.users_table.setStyleSheet(
-            f"""
-            QTableWidget {{
-                background-color: {ModernStyle.SURFACE};
-                alternate-background-color: {ModernStyle.SURFACE_VARIANT};
-                color: {ModernStyle.TEXT_PRIMARY};
-                gridline-color: {ModernStyle.BORDER};
-                border: 1px solid {ModernStyle.BORDER};
-            }}
-            QTableWidget::item {{
-                padding: 6px;
-            }}
-            QHeaderView::section {{
-                background-color: {ModernStyle.BACKGROUND};
-                color: {ModernStyle.TEXT_PRIMARY};
-                border: 1px solid {ModernStyle.BORDER};
-                padding: 6px;
-            }}
-            QTableWidget::item:selected {{
-                background-color: {ModernStyle.PRIMARY};
-                color: {ModernStyle.TEXT_PRIMARY};
-            }}
-            """
-        )
-
-        header_obj = self.users_table.horizontalHeader()
-        header_obj.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header_obj.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header_obj.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header_obj.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header_obj.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self._manage_users_activity_delegate = _ActivityDotDelegate(self.users_table)
-        self.users_table.setItemDelegateForColumn(4, self._manage_users_activity_delegate)
-
-        left_layout.addWidget(self.users_table)
-        splitter.addWidget(left)
-
-        # Right: tabs (Launcher + Edit)
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(8, 0, 0, 0)
-
-        self.right_tabs = QTabWidget()
-        self.right_tabs.addTab(self._build_launch_tab(), "Launcher")
-        self.right_tabs.addTab(self._build_edit_tab(), "Edit")
-        right_layout.addWidget(self.right_tabs)
-        splitter.addWidget(right)
-
-        splitter.setSizes([900, 500])
-        manage_layout.addWidget(splitter)
-        self.content_stack.addWidget(manage_page)
-        self.content_stack.addWidget(self._build_bulk_delete_page())
-        self.content_stack.setCurrentIndex(0)
-        main_layout.addWidget(self.content_stack)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Save And Close")
-        cancel_btn = buttons.button(QDialogButtonBox.StandardButton.Cancel)
-        cancel_btn.setText("Cancel")
-        cancel_btn.setProperty("class", "danger")
-        buttons.accepted.connect(self.save_and_close)
-        buttons.rejected.connect(self._confirm_close_without_saving)
-        main_layout.addWidget(buttons)
-
-        self._set_edit_mode(None)
-        self._update_launch_actions()
-
-    def _build_launch_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(8)
-
-        self.launch_summary = QLabel("Select one or more users from the table.")
-        self.launch_summary.setWordWrap(True)
-        self.launch_summary.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        layout.addWidget(self.launch_summary)
-
-        target_group = QGroupBox("Target")
-        target_form = QFormLayout(target_group)
-
-        self.launch_server_link_input = QLineEdit()
-        self.launch_server_link_input.setPlaceholderText("Private server / share link (leave empty to use Place ID)")
-        try:
-            self.launch_server_link_input.textChanged.connect(self._update_launch_actions)
-        except Exception:
-            pass
-        target_form.addRow("Server Link:", self.launch_server_link_input)
-
-        self.launch_place_id_input = QLineEdit()
-        self.launch_place_id_input.setPlaceholderText("Place ID (used when Server Link is empty)")
-        try:
-            self.launch_place_id_input.setText(self._default_place_id())
-        except Exception:
-            pass
-        try:
-            self.launch_place_id_input.textChanged.connect(self._update_launch_actions)
-        except Exception:
-            pass
-        target_form.addRow("Place ID:", self.launch_place_id_input)
-
-        self.launch_roblox_btn = QPushButton("Launch Roblox")
-        self.launch_roblox_btn.clicked.connect(self.launch_roblox_for_selected)
-        target_form.addRow(self.launch_roblox_btn)
-
-        hint = QLabel("If Server Link is empty, Place ID is used (public lobby).")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        target_form.addRow(hint)
-
-        layout.addWidget(target_group)
-
-        description_group = QGroupBox("Description")
-        dg = QVBoxLayout(description_group)
-
-        self.launch_description_input = QTextEdit()
-        self.launch_description_input.setPlaceholderText("Optional description (saved per user)")
-        try:
-            self.launch_description_input.setAcceptRichText(False)
-        except Exception:
-            pass
-        try:
-            fm = self.launch_description_input.fontMetrics()
-            row_h = fm.lineSpacing() if fm else 16
-            self.launch_description_input.setFixedHeight(int(row_h * 5 + 12))
-        except Exception:
-            pass
-        dg.addWidget(self.launch_description_input)
-
-        desc_btn_row = QHBoxLayout()
-        desc_btn_row.addStretch(1)
-        self.apply_description_btn = QPushButton("Apply")
-        self.apply_description_btn.setToolTip("Apply this description to the selected user(s)")
-        self.apply_description_btn.clicked.connect(self._apply_description_to_selected)
-        desc_btn_row.addWidget(self.apply_description_btn)
-        dg.addLayout(desc_btn_row)
-
-        layout.addWidget(description_group)
-
-        browser_group = QGroupBox("Browser (cookie-loaded)")
-        bg = QVBoxLayout(browser_group)
-
-        top_row = QHBoxLayout()
-        self.open_browser_home_btn = QPushButton("Open Roblox Home")
-        self.open_browser_home_btn.clicked.connect(lambda: self.open_browser_for_selected("home"))
-        top_row.addWidget(self.open_browser_home_btn)
-        top_row.addStretch(1)
-        bg.addLayout(top_row)
-
-        link_row = QHBoxLayout()
-        self.browser_any_link_input = QLineEdit()
-        self.browser_any_link_input.setPlaceholderText("Any link to open (optional)")
-        try:
-            self.browser_any_link_input.textChanged.connect(self._update_launch_actions)
-        except Exception:
-            pass
-        link_row.addWidget(self.browser_any_link_input, 1)
-
-        self.open_browser_link_btn = QPushButton("Open Link")
-        self.open_browser_link_btn.clicked.connect(lambda: self.open_browser_for_selected("link"))
-        link_row.addWidget(self.open_browser_link_btn)
-        bg.addLayout(link_row)
-
-        layout.addWidget(browser_group)
-
-        layout.addStretch(1)
-        return w
-
-    def _build_edit_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
-
-        self.edit_hint = QLabel("Select a single user to edit, or clear selection to add a new user.")
-        self.edit_hint.setWordWrap(True)
-        self.edit_hint.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        layout.addWidget(self.edit_hint)
-
-        self.edit_group = QGroupBox("User Details")
-        form = QFormLayout(self.edit_group)
-
-        self.user_id_input = QLineEdit()
-        self.user_id_input.setPlaceholderText("User ID (e.g., 123456789)")
-        form.addRow("User ID:", self.user_id_input)
-
-        self.username_input = QLineEdit()
-        self.username_input.setPlaceholderText("Username (e.g., PlayerName)")
-        form.addRow("Username:", self.username_input)
-
-        self.private_server_input = QLineEdit()
-        self.private_server_input.setPlaceholderText("Private server link or share link (optional)")
-        form.addRow("Server Link:", self.private_server_input)
-
-        self.place_input = QLineEdit()
-        self.place_input.setPlaceholderText("Place ID (optional)")
-        form.addRow("Place:", self.place_input)
-
-        cookie_row = QWidget()
-        cookie_row_layout = QHBoxLayout(cookie_row)
-        cookie_row_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.cookie_input = QLineEdit()
-        self.cookie_input.setPlaceholderText(".ROBLOSECURITY cookie")
-        cookie_row_layout.addWidget(self.cookie_input)
-
-        self.browser_login_btn = QPushButton("Login (Extract Cookie)")
-        self.browser_login_btn.setToolTip("Open browser to login and automatically extract cookie")
-        self.browser_login_btn.clicked.connect(self.extract_cookie_from_browser)
-        cookie_row_layout.addWidget(self.browser_login_btn)
-
-        form.addRow("Cookie:", cookie_row)
-
-        flags_row = QWidget()
-        flags_layout = QVBoxLayout(flags_row)
-        flags_layout.setContentsMargins(0, 0, 0, 0)
-        flags_layout.setSpacing(4)
-
-        flags_top = QHBoxLayout()
-        flags_top.setContentsMargins(0, 0, 0, 0)
-        self.disabled_chk = QCheckBox("Disabled")
-        self.bad_chk = QCheckBox("Bad Cookie")
-        self.cap_chk = QCheckBox("Captcha Lock")
-        self.alternate_chk = QCheckBox("Alternate")
-        self.alternate_chk.setToolTip(
-            "Alternate launch mode (no cookies).\n"
-            "Launches via roblox://placeId=<place> (public) or roblox://placeId=<place>&linkCode=<code> (private)."
-        )
-        self.skip_reconnect_on_log_disconnect_chk = QCheckBox("Disable log reconnects")
-        self.skip_reconnect_on_log_disconnect_chk.setToolTip(
-            "When enabled, this account will not auto-reconnect after log disconnects."
-        )
-        try:
-            self.alternate_chk.toggled.connect(self._on_edit_alternate_toggled)
-        except Exception:
-            pass
-        flags_top.addWidget(self.disabled_chk)
-        flags_top.addWidget(self.bad_chk)
-        flags_top.addWidget(self.cap_chk)
-        flags_top.addWidget(self.alternate_chk)
-        flags_top.addStretch(1)
-        flags_layout.addLayout(flags_top)
-
-        flags_bottom = QHBoxLayout()
-        flags_bottom.setContentsMargins(0, 0, 0, 0)
-        flags_bottom.addWidget(self.skip_reconnect_on_log_disconnect_chk)
-        flags_bottom.addStretch(1)
-        flags_layout.addLayout(flags_bottom)
-        form.addRow("Flags:", flags_row)
-
-        layout.addWidget(self.edit_group)
-
-        btn_row = QHBoxLayout()
-        self.add_btn = QPushButton("Add User")
-        self.add_btn.clicked.connect(self.add_user)
-        btn_row.addWidget(self.add_btn)
-
-        self.update_btn = QPushButton("Update User")
-        self.update_btn.clicked.connect(self.update_user)
-        btn_row.addWidget(self.update_btn)
-
-        self.delete_btn = QPushButton("Delete User")
-        self.delete_btn.setProperty("class", "danger")
-        self.delete_btn.clicked.connect(self.delete_selected_user)
-        btn_row.addWidget(self.delete_btn)
-
-        self.cancel_edit_btn = QPushButton("Cancel")
-        self.cancel_edit_btn.clicked.connect(self.cancel_edit)
-        btn_row.addWidget(self.cancel_edit_btn)
-
-        btn_row.addStretch(1)
-        layout.addLayout(btn_row)
-
-        return w
-
-    def _build_bulk_delete_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(10)
-
-        title = QLabel("Bulk Delete Users")
-        title_font = title.font()
-        title_font.setPointSize(title_font.pointSize() + 3)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        layout.addWidget(title)
-
-        intro = QLabel(
-            "Choose one or more filters to preview accounts for deletion. Last-launch and flag "
-            "filters are combined; within the flag filter you can match any or all selected flags."
-        )
-        intro.setWordWrap(True)
-        intro.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        layout.addWidget(intro)
-
-        criteria_row = QHBoxLayout()
-
-        activity_group = QGroupBox("Last Launch")
-        activity_layout = QVBoxLayout(activity_group)
-
-        inactivity_row = QHBoxLayout()
-        self.bulk_use_inactivity_chk = QCheckBox("Not launched for at least")
-        self.bulk_use_inactivity_chk.setChecked(True)
-        inactivity_row.addWidget(self.bulk_use_inactivity_chk)
-
-        self.bulk_inactive_days_spin = QSpinBox()
-        self.bulk_inactive_days_spin.setRange(1, 36500)
-        self.bulk_inactive_days_spin.setValue(30)
-        self.bulk_inactive_days_spin.setSuffix(" days")
-        inactivity_row.addWidget(self.bulk_inactive_days_spin)
-        inactivity_row.addStretch(1)
-        activity_layout.addLayout(inactivity_row)
-
-        self.bulk_include_never_chk = QCheckBox("Include accounts that have never launched")
-        self.bulk_include_never_chk.setChecked(False)
-        activity_layout.addWidget(self.bulk_include_never_chk)
-
-        activity_hint = QLabel("Turn off the inactivity filter to delete by flags alone.")
-        activity_hint.setWordWrap(True)
-        activity_hint.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        activity_layout.addWidget(activity_hint)
-        activity_layout.addStretch(1)
-        criteria_row.addWidget(activity_group, 1)
-
-        flags_group = QGroupBox("Flags")
-        flags_layout = QVBoxLayout(flags_group)
-
-        self.bulk_flag_checks: dict[str, QCheckBox] = {}
-        flags_grid = QGridLayout()
-        for index, (key, label) in enumerate(_BULK_DELETE_FLAG_LABELS.items()):
-            checkbox = QCheckBox(label)
-            self.bulk_flag_checks[key] = checkbox
-            flags_grid.addWidget(checkbox, index // 2, index % 2)
-        flags_layout.addLayout(flags_grid)
-
-        match_row = QHBoxLayout()
-        match_row.addWidget(QLabel("Match:"))
-        self.bulk_flag_match_combo = QComboBox()
-        self.bulk_flag_match_combo.addItem("Any selected flag", "any")
-        self.bulk_flag_match_combo.addItem("All selected flags", "all")
-        match_row.addWidget(self.bulk_flag_match_combo)
-        match_row.addStretch(1)
-        flags_layout.addLayout(match_row)
-
-        flags_hint = QLabel("With no flags selected, flags do not restrict the preview.")
-        flags_hint.setWordWrap(True)
-        flags_hint.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        flags_layout.addWidget(flags_hint)
-        criteria_row.addWidget(flags_group, 1)
-
-        layout.addLayout(criteria_row)
-
-        self.bulk_preview_label = QLabel("Matching users: 0")
-        self.bulk_preview_label.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        layout.addWidget(self.bulk_preview_label)
-
-        self.bulk_preview_table = QTableWidget()
-        self.bulk_preview_table.setColumnCount(4)
-        self.bulk_preview_table.setHorizontalHeaderLabels(["User ID", "Username", "Last Launch", "Flags"])
-        self.bulk_preview_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.bulk_preview_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.bulk_preview_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.bulk_preview_table.verticalHeader().setVisible(False)
-        self.bulk_preview_table.setAlternatingRowColors(True)
-        self.bulk_preview_table.setStyleSheet(
-            f"""
-            QTableWidget {{
-                background-color: {ModernStyle.SURFACE};
-                alternate-background-color: {ModernStyle.SURFACE_VARIANT};
-                color: {ModernStyle.TEXT_PRIMARY};
-                gridline-color: {ModernStyle.BORDER};
-                border: 1px solid {ModernStyle.BORDER};
-            }}
-            QTableWidget::item {{
-                padding: 6px;
-            }}
-            QHeaderView::section {{
-                background-color: {ModernStyle.BACKGROUND};
-                color: {ModernStyle.TEXT_PRIMARY};
-                border: 1px solid {ModernStyle.BORDER};
-                padding: 6px;
-            }}
-            QTableWidget::item:selected {{
-                background-color: {ModernStyle.PRIMARY};
-                color: {ModernStyle.TEXT_PRIMARY};
-            }}
-            """
-        )
-        preview_header = self.bulk_preview_table.horizontalHeader()
-        preview_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        preview_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        preview_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        preview_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.bulk_preview_table, 1)
-
-        action_row = QHBoxLayout()
-        self.bulk_delete_matching_btn = QPushButton("Delete Matching Users (0)")
-        self.bulk_delete_matching_btn.setProperty("class", "danger")
-        self.bulk_delete_matching_btn.clicked.connect(self._delete_matching_users)
-        self.bulk_delete_matching_btn.setEnabled(False)
-        action_row.addWidget(self.bulk_delete_matching_btn)
-        action_row.addStretch(1)
-
-        self.bulk_delete_all_btn = QPushButton("Delete All Users")
-        self.bulk_delete_all_btn.setProperty("class", "danger")
-        self.bulk_delete_all_btn.clicked.connect(self._delete_all_users)
-        action_row.addWidget(self.bulk_delete_all_btn)
-        layout.addLayout(action_row)
-
-        staged_hint = QLabel(
-            "Bulk deletions are confirmed only once you choose Save And Close. Use Cancel to discard changes."
-        )
-        staged_hint.setWordWrap(True)
-        staged_hint.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        layout.addWidget(staged_hint)
-
-        self.bulk_use_inactivity_chk.toggled.connect(self._update_bulk_filter_controls)
-        self.bulk_inactive_days_spin.valueChanged.connect(self._refresh_bulk_delete_preview)
-        self.bulk_include_never_chk.toggled.connect(self._refresh_bulk_delete_preview)
-        self.bulk_flag_match_combo.currentIndexChanged.connect(self._refresh_bulk_delete_preview)
-        for checkbox in self.bulk_flag_checks.values():
-            checkbox.toggled.connect(self._refresh_bulk_delete_preview)
-
-        self._update_bulk_filter_controls()
-        return page
-
-    def _toggle_bulk_delete_mode(self) -> None:
-        self._set_bulk_delete_mode(not self._bulk_delete_mode)
-
-    def _set_bulk_delete_mode(self, enabled: bool) -> None:
-        self._bulk_delete_mode = bool(enabled)
-        self.content_stack.setCurrentIndex(1 if self._bulk_delete_mode else 0)
-        self.bulk_delete_mode_btn.setText("Back to Users" if self._bulk_delete_mode else "Bulk Delete")
-        self.bulk_delete_mode_btn.setProperty("class", "" if self._bulk_delete_mode else "danger")
-        try:
-            self.bulk_delete_mode_btn.style().unpolish(self.bulk_delete_mode_btn)
-            self.bulk_delete_mode_btn.style().polish(self.bulk_delete_mode_btn)
-        except Exception:
-            pass
-        self.search_input.setEnabled(not self._bulk_delete_mode)
-        if self._bulk_delete_mode:
-            self.search_input.clear()
-            self.search_input.setPlaceholderText("")
-            self.search_input.setToolTip("Return to the user list to search accounts.")
-            self._refresh_bulk_delete_preview()
-        else:
-            self.search_input.setPlaceholderText("Search by user ID / username...")
-            self.search_input.setToolTip("")
-            self._update_launch_actions()
-
-    def _update_bulk_filter_controls(self, *_args) -> None:
-        use_inactivity = bool(self.bulk_use_inactivity_chk.isChecked())
-        self.bulk_inactive_days_spin.setEnabled(use_inactivity)
-        self.bulk_include_never_chk.setEnabled(use_inactivity)
-        self._refresh_bulk_delete_preview()
-
-    def _selected_bulk_flag_keys(self) -> list[str]:
-        return [key for key, checkbox in self.bulk_flag_checks.items() if checkbox.isChecked()]
-
-    def _bulk_delete_candidate_ids(self) -> list[str]:
-        if not isinstance(self.original_config, dict):
-            return []
-        now = time.time()
-        selected_flags = self._selected_bulk_flag_keys()
-        match_all = self.bulk_flag_match_combo.currentData() == "all"
-        candidates = [
-            str(uid)
-            for uid, info in self.original_config.items()
-            if _matches_bulk_user_delete_filters(
-                info,
-                use_inactivity=self.bulk_use_inactivity_chk.isChecked(),
-                inactive_days=self.bulk_inactive_days_spin.value(),
-                include_never_launched=self.bulk_include_never_chk.isChecked(),
-                selected_flags=selected_flags,
-                match_all_flags=match_all,
-                now=now,
-            )
-        ]
-
-        def _sort_key(uid: str):
-            if uid.isdigit():
-                try:
-                    return (0, int(uid))
-                except Exception:
-                    pass
-            return (1, uid.lower())
-
-        return sorted(candidates, key=_sort_key)
-
-    def _bulk_user_flag_text(self, info: object) -> str:
-        if not isinstance(info, dict):
-            return "None"
-        labels = [label for key, label in _BULK_DELETE_FLAG_LABELS.items() if bool(info.get(key, False))]
-        return ", ".join(labels) if labels else "None"
-
-    def _refresh_bulk_delete_preview(self, *_args) -> None:
-        if not hasattr(self, "bulk_preview_table"):
-            return
-        candidate_ids = self._bulk_delete_candidate_ids()
-        now = time.time()
-        self.bulk_preview_table.setRowCount(len(candidate_ids))
-        for row, uid in enumerate(candidate_ids):
-            info = self.original_config.get(uid, {}) if isinstance(self.original_config, dict) else {}
-            if not isinstance(info, dict):
-                info = {}
-            username = str(info.get("username", f"User_{uid}"))
-            timestamp = _coerce_activity_timestamp(info.get("last_launch", 0.0))
-            if timestamp <= 0:
-                last_launch = "Never"
-            else:
-                try:
-                    launched = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    launched = "Unknown"
-                age = _activity_days_since(timestamp, now=now)
-                last_launch = f"{launched} ({age:.1f} days ago)" if age is not None else launched
-
-            self.bulk_preview_table.setItem(row, 0, QTableWidgetItem(uid))
-            self.bulk_preview_table.setItem(row, 1, QTableWidgetItem(username))
-            self.bulk_preview_table.setItem(row, 2, QTableWidgetItem(last_launch))
-            self.bulk_preview_table.setItem(row, 3, QTableWidgetItem(self._bulk_user_flag_text(info)))
-
-        count = len(candidate_ids)
-        total = len(self.original_config) if isinstance(self.original_config, dict) else 0
-        self.bulk_preview_label.setText(f"Matching users: {count} of {total}")
-        self.bulk_delete_matching_btn.setText(f"Delete Matching Users ({count})")
-        self.bulk_delete_matching_btn.setEnabled(count > 0)
-        self.bulk_delete_all_btn.setEnabled(total > 0)
-        if self._bulk_delete_mode:
-            self.selected_count_label.setText(f"Matching: {count}")
-
-    def _bulk_delete_criteria_text(self) -> str:
-        criteria: list[str] = []
-        if self.bulk_use_inactivity_chk.isChecked():
-            activity = f"not launched for at least {self.bulk_inactive_days_spin.value()} days"
-            if self.bulk_include_never_chk.isChecked():
-                activity += " (including never launched)"
-            criteria.append(activity)
-        selected_flags = self._selected_bulk_flag_keys()
-        if selected_flags:
-            joiner = " and " if self.bulk_flag_match_combo.currentData() == "all" else " or "
-            labels = [_BULK_DELETE_FLAG_LABELS[key] for key in selected_flags]
-            criteria.append("flags: " + joiner.join(labels))
-        return "; ".join(criteria) if criteria else "no filters"
-
-    def _delete_matching_users(self) -> None:
-        candidate_ids = self._bulk_delete_candidate_ids()
-        if not candidate_ids:
-            QMessageBox.information(self, "No Matches", "No users match the current bulk-delete filters.")
-            return
-
-        reply = QMessageBox.warning(
-            self,
-            "Confirm Bulk Delete",
-            f"Mark {len(candidate_ids)} matching user(s) for deletion?\n\n"
-            f"Criteria: {self._bulk_delete_criteria_text()}\n\n"
-            "The deletion is written only once you choose Save And Close.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        for uid in candidate_ids:
-            self.original_config.pop(uid, None)
-        if self.selected_user_id in candidate_ids:
-            self.selected_user_id = None
-        self.refresh_user_list()
-        QMessageBox.information(
-            self,
-            "Bulk Delete Staged",
-            f"Staged {len(candidate_ids)} user(s) for deletion. Choose Save And Close to apply the change.",
-        )
-
-    def _delete_all_users(self) -> None:
-        total = len(self.original_config) if isinstance(self.original_config, dict) else 0
-        if total <= 0:
-            QMessageBox.information(self, "No Users", "There are no users to delete.")
-            return
-
-        reply = QMessageBox.warning(
-            self,
-            "Delete All Users?",
-            f"Mark ALL {total} user(s) for deletion?\n\n"
-            "This ignores the filters above. The deletion is written only once you choose Save And Close.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        self.original_config.clear()
-        self.selected_user_id = None
-        self.refresh_user_list()
-        QMessageBox.information(
-            self,
-            "Delete All Staged",
-            f"Staged all {total} user(s) for deletion. Choose Save And Close to apply the change.",
-        )
-
-    def load_users(self) -> None:
-        try:
-            self.original_config = self.config_manager.load_users() or {}
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to load users: {e}")
-            self.original_config = {}
-        self.refresh_user_list()
-
-    def refresh_user_list(self) -> None:
-        query = self.search_input.text().strip().lower() if hasattr(self, "search_input") else ""
-
-        rows: list[tuple[str, dict]] = []
-        for uid, info in (self.original_config or {}).items():
-            uid = str(uid)
-            if not isinstance(info, dict):
-                continue
-            username = str(info.get("username", ""))
-            if query and (query not in uid.lower()) and (query not in username.lower()):
-                continue
-            rows.append((uid, info))
-
-        def _sort_key(item):
-            uid0 = item[0]
-            if uid0.isdigit():
-                try:
-                    return (0, int(uid0))
-                except Exception:
-                    return (0, uid0)
-            return (1, uid0)
-
-        rows.sort(key=_sort_key)
-
-        self.users_table.setRowCount(len(rows))
-        for r, (uid, info) in enumerate(rows):
-            username = str(info.get("username", f"User_{uid}"))
-            psl = str(info.get("private_server_link", "") or "").strip()
-            place = str(info.get("place", "") or "").strip()
-            description = str(info.get("description", "") or "").strip()
-
-            if bool(info.get("alternate_launch", False)):
-                mode = "Alternate"
-                link_preview = psl if psl else (place or "Default")
-            elif psl:
-                mode = "Share" if "roblox.com/share" in psl else "Private"
-                link_preview = psl
-            else:
-                mode = "Public"
-                link_preview = place or "Default"
-
-            if "roblox.com/share" in link_preview and "code=" in link_preview:
-                try:
-                    code = link_preview.split("code=", 1)[1].split("&", 1)[0]
-                    link_preview = f"Share:{code}"
-                except Exception:
-                    pass
-            if len(link_preview) > 64:
-                link_preview = link_preview[:61] + "..."
-            desc_preview = description
-            if len(desc_preview) > 64:
-                desc_preview = desc_preview[:61] + "..."
-
-            uid_item = QTableWidgetItem(uid)
-            uid_item.setData(Qt.ItemDataRole.UserRole, uid)
-            self.users_table.setItem(r, 0, uid_item)
-            self.users_table.setItem(r, 1, QTableWidgetItem(username))
-            self.users_table.setItem(r, 2, QTableWidgetItem(mode))
-
-            link_item = QTableWidgetItem(link_preview)
-            if psl:
-                link_item.setToolTip(psl)
-            self.users_table.setItem(r, 3, link_item)
-            desc_item = QTableWidgetItem(desc_preview)
-            desc_item.setData(_ACTIVITY_TIMESTAMP_ROLE, _coerce_activity_timestamp(info.get("last_launch", 0.0)))
-            activity_tip = _activity_tooltip(info.get("last_launch", 0.0))
-            if description:
-                desc_item.setToolTip(f"{description}\n\n{activity_tip}")
-            else:
-                desc_item.setToolTip(activity_tip)
-            self.users_table.setItem(r, 4, desc_item)
-
-        try:
-            self.users_table.resizeRowsToContents()
-        except Exception:
-            pass
-
-        self._update_launch_actions()
-        self._sync_edit_with_selection()
-        self._refresh_bulk_delete_preview()
-
-    def save_and_close(self) -> None:
-        self._merge_latest_activity_from_disk()
-        if self.config_manager.save_users(self.original_config):
-            self.accept()
-        else:
-            err = self.config_manager.get_cookie_error()
-            msg = "Failed to save users.json."
-            if err:
-                msg = msg + "\n\n" + err
-            QMessageBox.critical(self, "Error", msg)
-
-    def _merge_latest_activity_from_disk(self) -> None:
-        try:
-            latest = self.config_manager.load_users() or {}
-        except Exception:
-            latest = {}
-        if not isinstance(latest, dict) or not isinstance(self.original_config, dict):
-            return
-        for uid, info in list(self.original_config.items()):
-            if not isinstance(info, dict):
-                continue
-            disk_info = latest.get(str(uid))
-            if not isinstance(disk_info, dict):
-                continue
-            local_ts = _coerce_activity_timestamp(info.get("last_launch", 0.0))
-            disk_ts = _coerce_activity_timestamp(disk_info.get("last_launch", 0.0))
-            if disk_ts > local_ts:
-                info["last_launch"] = disk_ts
-                self.original_config[str(uid)] = info
-
-    def _confirm_close_without_saving(self) -> None:
-        reply = QMessageBox.warning(
-            self,
-            "Discard Changes?",
-            "Changes made will not save.\n\nAre you sure you want to close?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.reject()
-
-    def open_browser_for_selected(self, mode: str) -> None:
-        uids = self._get_selected_user_ids()
-        if not uids:
-            return
-
-        mode = str(mode or "").strip().lower()
-        if mode not in ("home", "link"):
-            mode = "home"
-
-        any_link = ""
-        try:
-            any_link = self.browser_any_link_input.text().strip()
-        except Exception:
-            any_link = ""
-
-        if mode == "link" and any_link:
-            try:
-                if any_link.startswith("//"):
-                    any_link = "https:" + any_link
-                elif not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", any_link):
-                    any_link = "https://" + any_link
-                try:
-                    self.browser_any_link_input.setText(any_link)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-        if mode == "link" and not any_link:
-            QMessageBox.information(self, "No Link", "Enter a link to open first.")
-            return
-
-        missing = []
-        skip_alternate = []
-        for uid in uids:
-            info = self.original_config.get(uid, {}) if isinstance(self.original_config, dict) else {}
-            if not isinstance(info, dict):
-                continue
-            if bool(info.get("alternate_launch", False)):
-                skip_alternate.append(uid)
-                continue
-            cookie = str(info.get("cookie", "") or "").strip()
-            if not cookie:
-                missing.append(uid)
-                continue
-
-            url = "https://www.roblox.com/home" if mode == "home" else any_link
-
-            try:
-                self._open_logged_in_browser(uid, cookie, url)
-            except Exception as e:
-                self._ui_log(f"[Browser] uid={uid} failed: {e}")
-
-        if skip_alternate or missing:
-            parts = []
-            if skip_alternate:
-                parts.append(
-                    f"Skipped {len(skip_alternate)} alternate-launch user(s) (does not use cookies):\n"
-                    + ", ".join(skip_alternate[:12])
-                    + (" ..." if len(skip_alternate) > 12 else "")
-                )
-            if missing:
-                parts.append(
-                    f"Skipped {len(missing)} user(s) with no cookie:\n"
-                    + ", ".join(missing[:12])
-                    + (" ..." if len(missing) > 12 else "")
-                )
-            QMessageBox.information(
-                self,
-                "Skipped Users",
-                "\n\n".join(parts).strip(),
-            )
-
-    def launch_roblox_for_selected(self) -> None:
-        uids = self._get_selected_user_ids()
-        if not uids:
-            return
-
-        try:
-            server_link = self.launch_server_link_input.text().strip()
-        except Exception:
-            server_link = ""
-
-        try:
-            place_id = self.launch_place_id_input.text().strip()
-        except Exception:
-            place_id = ""
-
-        if not place_id:
-            place_id = self._default_place_id()
-
-        skip_disabled = []
-        skip_flagged = []
-        skip_no_cookie = []
-        skip_online = []
-        launch_list: list[str] = []
-
-        for uid in uids:
-            info = self.original_config.get(uid, {}) if isinstance(self.original_config, dict) else {}
-            if not isinstance(info, dict):
-                continue
-            if self._is_uid_online_in_manager(uid) or self._is_uid_online_in_stopped_state(uid):
-                skip_online.append(uid)
-                continue
-            if bool(info.get("disabled", False)):
-                skip_disabled.append(uid)
-                continue
-            if bool(info.get("bad", False)) or bool(info.get("cap", False)):
-                skip_flagged.append(uid)
-                continue
-            is_alt = bool(info.get("alternate_launch", False))
-            cookie = str(info.get("cookie", "") or "").strip()
-            if (not cookie) and (not is_alt):
-                skip_no_cookie.append(uid)
-                continue
-            launch_list.append(uid)
-
-        try:
-            worker_states = getattr(getattr(self.parent(), "worker_thread", None), "user_states", {}) or {}
-        except Exception:
-            worker_states = {}
-        launch_list = [
-            uid
-            for _idx, uid in sorted(
-                enumerate(launch_list),
-                key=lambda pair: launch_queue_sort_key(
-                    pair[1],
-                    self.original_config.get(str(pair[1]), {})
-                    if isinstance(self.original_config, dict)
-                    else {},
-                    worker_states.get(str(pair[1]), {}),
-                    pair[0],
-                ),
-            )
-        ]
-
-        if not launch_list:
-            QMessageBox.information(self, "Nothing To Launch", "No selected users are launchable (already online/disabled/flagged/missing cookie for cookie-mode users).")
-            return
-
-        if len(launch_list) > 1:
-            reply = QMessageBox.question(
-                self,
-                "Confirm Launch",
-                f"Launch Roblox for {len(launch_list)} users?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-
-        if self._manager_running():
-            parent = self.parent()
-            wt = getattr(parent, "worker_thread", None)
-            for uid in launch_list:
-                try:
-                    info0 = self.original_config.get(uid, {}) if isinstance(self.original_config, dict) else {}
-                    launch_info = dict(info0) if isinstance(info0, dict) else {}
-                    if server_link:
-                        launch_info["private_server_link"] = server_link
-                        launch_info["server_type"] = "private"
-                        # Fallback place for share-link resolve failures, etc.
-                        if place_id:
-                            launch_info["place"] = place_id
-                    else:
-                        launch_info["private_server_link"] = ""
-                        launch_info["server_type"] = "public"
-                        launch_info["place"] = place_id
-                    submit = getattr(wt, "submit_action", None)
-                    if callable(submit):
-                        submit("launch_user_session_custom", uid, launch_info, skip_cleanup=False)
-                    else:
-                        self._ui_log(f"[ManualLaunch] uid={uid} failed: worker action queue unavailable")
-                except Exception as e:
-                    self._ui_log(f"[ManualLaunch] uid={uid} failed: {e}")
-            if skip_online:
-                self._ui_log(f"[ManualLaunch] Skipped {len(skip_online)} already-online user(s).")
-            return
-
-        # Manager is off: manual launching on a background thread.
-        try:
-            self.launch_roblox_btn.setEnabled(False)
-        except Exception:
-            pass
-
-        def _run():
-            try:
-                launcher = self._get_manual_launcher()
-                try:
-                    manual_launch_delay = max(0.0, float(getattr(launcher, "launch_delay", 0) or 0))
-                except Exception:
-                    manual_launch_delay = 0.0
-                for idx, uid in enumerate(launch_list):
-                    info0 = self.original_config.get(uid, {}) if isinstance(self.original_config, dict) else {}
-                    launch_info = dict(info0) if isinstance(info0, dict) else {}
-                    if server_link:
-                        launch_info["private_server_link"] = server_link
-                        launch_info["server_type"] = "private"
-                        if place_id:
-                            launch_info["place"] = place_id
-                    else:
-                        launch_info["private_server_link"] = ""
-                        launch_info["server_type"] = "public"
-                        launch_info["place"] = place_id
-
-                    cookie = str((launch_info or {}).get("cookie", "") or "").strip()
-                    self._ui_log(f"[ManualLaunch] launching uid={uid}")
-                    try:
-                        launcher.start_game_session(uid, cookie, launch_info, skip_cleanup=False)
-                    except Exception as e:
-                        self._ui_log(f"[ManualLaunch] uid={uid} error: {e}")
-                    if idx < len(launch_list) - 1 and manual_launch_delay > 0:
-                        self._ui_log(f"[ManualLaunch] waiting {manual_launch_delay:.1f}s before next launch")
-                        time.sleep(manual_launch_delay)
-                self._ui_log(f"[ManualLaunch] done ({len(launch_list)} users)")
-            finally:
-                QTimer.singleShot(0, lambda: self.launch_roblox_btn.setEnabled(True))
-
-        threading.Thread(target=_run, daemon=True).start()
-
-        if skip_disabled or skip_flagged or skip_no_cookie or skip_online:
-            parts = []
-            if skip_online:
-                parts.append(f"already_online={len(skip_online)}")
-            if skip_disabled:
-                parts.append(f"disabled={len(skip_disabled)}")
-            if skip_flagged:
-                parts.append(f"flagged={len(skip_flagged)}")
-            if skip_no_cookie:
-                parts.append(f"no_cookie={len(skip_no_cookie)}")
-            self._ui_log("[ManualLaunch] skipped: " + ", ".join(parts))
-
-    # ---------------- Selection & editing ----------------
-    def _get_selected_user_ids(self) -> list[str]:
-        selected_rows = set()
-        try:
-            for idx in self.users_table.selectedIndexes():
-                selected_rows.add(idx.row())
-        except Exception:
-            return []
-
-        uids: list[str] = []
-        for r in sorted(selected_rows):
-            it = self.users_table.item(r, 0)
-            if it is None:
-                continue
-            uid = it.data(Qt.ItemDataRole.UserRole) or it.text()
-            if uid:
-                uids.append(str(uid))
-        return uids
-
-    def _on_table_double_clicked(self, row: int, col: int) -> None:
-        try:
-            self.right_tabs.setCurrentIndex(1)
-        except Exception:
-            pass
-
-    def _on_table_selection_changed(self) -> None:
-        self._update_launch_actions()
-        self._sync_launch_target_with_selection()
-        self._sync_edit_with_selection()
-
-    def _update_launch_actions(self) -> None:
-        uids = self._get_selected_user_ids()
-        if not uids:
-            self.launch_summary.setText("Select one or more users from the table.")
-        elif len(uids) == 1:
-            self.launch_summary.setText(f"Selected: {uids[0]}")
-        else:
-            preview = ", ".join(uids[:4]) + (" ..." if len(uids) > 4 else "")
-            self.launch_summary.setText(f"Selected: {len(uids)} users ({preview})")
-
-        try:
-            self.selected_count_label.setText(f"Selected: {len(uids)}")
-        except Exception:
-            pass
-
-        has_selection = bool(uids)
-
-        any_link = ""
-        try:
-            any_link = self.browser_any_link_input.text().strip()
-        except Exception:
-            any_link = ""
-
-        cookie_capable = False
-        try:
-            for uid in uids:
-                info = self.original_config.get(str(uid), {}) if isinstance(self.original_config, dict) else {}
-                if not isinstance(info, dict):
-                    continue
-                if not bool(info.get("alternate_launch", False)):
-                    cookie_capable = True
-                    break
-        except Exception:
-            cookie_capable = False
-
-        open_home_enabled = has_selection and cookie_capable
-        open_link_enabled = has_selection and bool(any_link) and cookie_capable
-        launch_enabled = has_selection
-
-        try:
-            self.open_browser_home_btn.setEnabled(open_home_enabled)
-        except Exception:
-            pass
-        try:
-            self.open_browser_link_btn.setEnabled(open_link_enabled)
-        except Exception:
-            pass
-        try:
-            self.launch_roblox_btn.setEnabled(launch_enabled)
-        except Exception:
-            pass
-        try:
-            self.apply_description_btn.setEnabled(has_selection)
-        except Exception:
-            pass
-
-    def _sync_launch_target_with_selection(self) -> None:
-        """
-        When exactly one user is selected, prefill the launcher inputs from that user.
-        """
-        uids = self._get_selected_user_ids()
-        if len(uids) != 1:
-            return
-
-        uid = str(uids[0])
-        info = self.original_config.get(uid, {}) if isinstance(self.original_config, dict) else {}
-        if not isinstance(info, dict):
-            return
-
-        link = str(info.get("private_server_link", "") or "").strip()
-        place = str(info.get("place", "") or "").strip() or self._default_place_id()
-        desc = str(info.get("description", "") or "").strip()
-
-        try:
-            self.launch_server_link_input.setText(link)
-        except Exception:
-            pass
-        try:
-            self.launch_place_id_input.setText(place)
-        except Exception:
-            pass
-        try:
-            self.launch_description_input.setPlainText(desc)
-        except Exception:
-            pass
-
-    def _apply_description_to_selected(self) -> None:
-        uids = self._get_selected_user_ids()
-        if not uids:
-            return
-
-        try:
-            desc = str(self.launch_description_input.toPlainText() or "").strip()
-        except Exception:
-            desc = ""
-
-        uids_set = set(str(u) for u in uids)
-        changed = 0
-        for uid in uids_set:
-            info = self.original_config.get(uid, {}) if isinstance(self.original_config, dict) else {}
-            if not isinstance(info, dict):
-                continue
-            if str(info.get("description", "") or "") != desc:
-                info["description"] = desc
-                self.original_config[uid] = info
-                changed += 1
-
-        if changed <= 0:
-            return
-
-        # Update table cells in-place to preserve selection.
-        try:
-            preview = desc
-            if len(preview) > 64:
-                preview = preview[:61] + "..."
-
-            for row in range(self.users_table.rowCount()):
-                it = self.users_table.item(row, 0)
-                if it is None:
-                    continue
-                row_uid = it.data(Qt.ItemDataRole.UserRole) or it.text()
-                if str(row_uid) not in uids_set:
-                    continue
-
-                desc_item = self.users_table.item(row, 4)
-                if desc_item is None:
-                    desc_item = QTableWidgetItem()
-                    self.users_table.setItem(row, 4, desc_item)
-                desc_item.setText(preview)
-                info = self.original_config.get(str(row_uid), {}) if isinstance(self.original_config, dict) else {}
-                ts = info.get("last_launch", 0.0) if isinstance(info, dict) else 0.0
-                desc_item.setData(_ACTIVITY_TIMESTAMP_ROLE, _coerce_activity_timestamp(ts))
-                activity_tip = _activity_tooltip(ts)
-                desc_item.setToolTip(f"{desc}\n\n{activity_tip}" if desc else activity_tip)
-        except Exception:
-            # Fallback: refresh if anything goes wrong.
-            try:
-                self.refresh_user_list()
-            except Exception:
-                pass
-
-        self._ui_log(f"[UI] Updated description for {changed} user(s).")
-
-    def _set_edit_mode(self, user_id: Optional[str]) -> None:
-        self.selected_user_id = user_id
-        is_edit = bool(user_id)
-        try:
-            self.user_id_input.setEnabled(not is_edit)
-        except Exception:
-            pass
-        try:
-            self.add_btn.setVisible(not is_edit)
-            self.update_btn.setVisible(is_edit)
-            self.delete_btn.setVisible(is_edit)
-        except Exception:
-            pass
-
-    def _sync_edit_with_selection(self) -> None:
-        uids = self._get_selected_user_ids()
-        if len(uids) == 1:
-            uid = uids[0]
-            self._load_user_into_form(uid)
-            self.edit_hint.setText(f"Editing user {uid}.")
-            try:
-                self.edit_group.setEnabled(True)
-            except Exception:
-                pass
-            self._set_edit_mode(uid)
-        elif len(uids) == 0:
-            self.edit_hint.setText("Add a new user (or select a single user to edit).")
-            try:
-                self.edit_group.setEnabled(True)
-            except Exception:
-                pass
-            self._clear_form()
-            self._set_edit_mode(None)
-        else:
-            self.edit_hint.setText("Multiple users selected. Editing is disabled.")
-            try:
-                self.edit_group.setEnabled(False)
-            except Exception:
-                pass
-            self._set_edit_mode(None)
-
-    def _clear_form(self) -> None:
-        try:
-            self.user_id_input.clear()
-            self.username_input.clear()
-            self.private_server_input.clear()
-            self.place_input.clear()
-            self.cookie_input.clear()
-            self.disabled_chk.setChecked(False)
-            self.bad_chk.setChecked(False)
-            if hasattr(self, "cap_chk"):
-                self.cap_chk.setChecked(False)
-            if hasattr(self, "alternate_chk"):
-                self.alternate_chk.setChecked(False)
-            if hasattr(self, "skip_reconnect_on_log_disconnect_chk"):
-                self.skip_reconnect_on_log_disconnect_chk.setChecked(False)
-        except Exception:
-            pass
-        try:
-            self._on_edit_alternate_toggled(False)
-        except Exception:
-            pass
-
-    def _load_user_into_form(self, user_id: str) -> None:
-        info = (self.original_config or {}).get(str(user_id), {})
-        if not isinstance(info, dict):
-            info = {}
-        try:
-            self.user_id_input.setText(str(user_id))
-            self.username_input.setText(str(info.get("username", f"User_{user_id}")))
-            self.private_server_input.setText(str(info.get("private_server_link", "") or ""))
-            self.place_input.setText(str(info.get("place", "") or ""))
-            self.cookie_input.setText(str(info.get("cookie", "") or ""))
-            self.disabled_chk.setChecked(bool(info.get("disabled", False)))
-            self.bad_chk.setChecked(bool(info.get("bad", False)))
-            if hasattr(self, "cap_chk"):
-                self.cap_chk.setChecked(bool(info.get("cap", False)))
-            if hasattr(self, "alternate_chk"):
-                self.alternate_chk.setChecked(bool(info.get("alternate_launch", False)))
-            if hasattr(self, "skip_reconnect_on_log_disconnect_chk"):
-                self.skip_reconnect_on_log_disconnect_chk.setChecked(
-                    bool(info.get("skip_reconnect_on_log_disconnect", False))
-                )
-        except Exception:
-            pass
-        try:
-            self._on_edit_alternate_toggled(bool(getattr(self, "alternate_chk", None) and self.alternate_chk.isChecked()))
-        except Exception:
-            pass
-
-    def _on_edit_alternate_toggled(self, checked: bool) -> None:
-        checked = bool(checked)
-        try:
-            self.cookie_input.setEnabled(not checked)
-            if checked:
-                self.cookie_input.setToolTip("Disabled: Alternate launch mode does not use cookies.")
-                self.cookie_input.setPlaceholderText("Not used in Alternate mode")
-            else:
-                self.cookie_input.setToolTip("")
-                self.cookie_input.setPlaceholderText(".ROBLOSECURITY cookie")
-        except Exception:
-            pass
-        try:
-            btn = getattr(self, "browser_login_btn", None)
-            if btn is not None:
-                btn.setEnabled(not checked)
-                btn.setToolTip(
-                    "Disabled: Alternate launch mode does not use cookies."
-                    if checked
-                    else "Open browser to login and automatically extract cookie"
-                )
-        except Exception:
-            pass
-
-    def cancel_edit(self) -> None:
-        try:
-            self.users_table.clearSelection()
-        except Exception:
-            pass
-        self._clear_form()
-        self._set_edit_mode(None)
-        self._update_launch_actions()
-
-    def _confirm_missing_ps_link(self) -> bool:
-        return (
-            QMessageBox.question(
-                self,
-                "No Server Link",
-                "No private server/share link is set.\n\nThis account will launch into the public lobby.\n\nContinue?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            == QMessageBox.StandardButton.Yes
-        )
-
-    def _derive_server_type(self, private_server_link: str, place: str) -> str:
-        if str(private_server_link or "").strip():
-            return "private"
-        if str(place or "").strip():
-            return "public"
-        return "private"
-
-    def add_user(self) -> None:
-        user_id = self.user_id_input.text().strip()
-        username = self.username_input.text().strip() or f"User_{user_id}"
-        private_server_link = self.private_server_input.text().strip()
-        place = self.place_input.text().strip()
-        cookie = self.cookie_input.text().strip()
-        disabled = bool(self.disabled_chk.isChecked())
-        bad = bool(self.bad_chk.isChecked())
-        cap = bool(getattr(self, "cap_chk", None) and self.cap_chk.isChecked())
-        alternate = bool(getattr(self, "alternate_chk", None) and self.alternate_chk.isChecked())
-        skip_reconnect_on_log_disconnect = bool(
-            getattr(self, "skip_reconnect_on_log_disconnect_chk", None)
-            and self.skip_reconnect_on_log_disconnect_chk.isChecked()
-        )
-
-        cookie_raw = cookie
-        if normalize_roblosecurity_cookie_value is not None:
-            try:
-                cookie = normalize_roblosecurity_cookie_value(cookie)
-            except Exception:
-                cookie = str(cookie or "").strip()
-            if cookie and cookie != cookie_raw:
-                try:
-                    self.cookie_input.setText(cookie)
-                except Exception:
-                    pass
-
-        if not user_id:
-            QMessageBox.warning(self, "Error", "User ID cannot be empty!")
-            self.user_id_input.setFocus()
-            return
-        if user_id in (self.original_config or {}):
-            QMessageBox.warning(self, "Error", f"User {user_id} already exists! Select it to edit.")
-            return
-
-        if not private_server_link:
-            if not self._confirm_missing_ps_link():
-                self.private_server_input.setFocus()
-                return
-
-        if (not alternate) and (not cookie):
-            QMessageBox.warning(self, "Error", "Cookie cannot be empty!")
-            self.cookie_input.setFocus()
-            return
-
-        if alternate:
-            for uid, info in (self.original_config or {}).items():
-                if not isinstance(info, dict):
-                    continue
-                info["alternate_launch"] = False
-                self.original_config[str(uid)] = info
-
-        self.original_config[user_id] = {
-            "username": username,
-            "private_server_link": private_server_link,
-            "place": place,
-            "cookie": cookie,
-            "server_type": self._derive_server_type(private_server_link, place),
-            "last_launch": 0.0,
-            "bad": bad,
-            "cap": cap,
-            "disabled": disabled,
-            "alternate_launch": alternate,
-            "launch_priority": DEFAULT_LAUNCH_PRIORITY,
-            "skip_reconnect_on_log_disconnect": skip_reconnect_on_log_disconnect,
-            "discord_user_ids": [],
-        }
-
-        self.refresh_user_list()
-        self.cancel_edit()
-        QMessageBox.information(self, "Success", f"User {user_id} ({username}) added.")
-
-    def update_user(self) -> None:
-        if not self.selected_user_id:
-            return
-
-        user_id = str(self.selected_user_id)
-        username = self.username_input.text().strip() or f"User_{user_id}"
-        private_server_link = self.private_server_input.text().strip()
-        place = self.place_input.text().strip()
-        cookie = self.cookie_input.text().strip()
-        disabled = bool(self.disabled_chk.isChecked())
-        bad = bool(self.bad_chk.isChecked())
-        cap = bool(getattr(self, "cap_chk", None) and self.cap_chk.isChecked())
-        alternate = bool(getattr(self, "alternate_chk", None) and self.alternate_chk.isChecked())
-        skip_reconnect_on_log_disconnect = bool(
-            getattr(self, "skip_reconnect_on_log_disconnect_chk", None)
-            and self.skip_reconnect_on_log_disconnect_chk.isChecked()
-        )
-
-        cookie_raw = cookie
-        if normalize_roblosecurity_cookie_value is not None:
-            try:
-                cookie = normalize_roblosecurity_cookie_value(cookie)
-            except Exception:
-                cookie = str(cookie or "").strip()
-            if cookie and cookie != cookie_raw:
-                try:
-                    self.cookie_input.setText(cookie)
-                except Exception:
-                    pass
-
-        if not private_server_link:
-            if not self._confirm_missing_ps_link():
-                self.private_server_input.setFocus()
-                return
-
-        if (not alternate) and (not cookie):
-            QMessageBox.warning(self, "Error", "Cookie cannot be empty!")
-            self.cookie_input.setFocus()
-            return
-
-        if alternate:
-            for uid, info in (self.original_config or {}).items():
-                if str(uid) == str(user_id):
-                    continue
-                if not isinstance(info, dict):
-                    continue
-                info["alternate_launch"] = False
-                self.original_config[str(uid)] = info
-
-        existing = self.original_config.get(user_id)
-        if not isinstance(existing, dict):
-            existing = {}
-
-        existing_cookie = str(existing.get("cookie", "") or "")
-        cookie_changed = str(cookie or "") != existing_cookie
-        if cookie_changed and bool(existing.get("bad", False)):
-            bad = False
-            try:
-                self.bad_chk.setChecked(False)
-            except Exception:
-                pass
-
-        updated = dict(existing)
-        updated.update(
-            {
-                "username": username,
-                "private_server_link": private_server_link,
-                "place": place,
-                "cookie": cookie,
-                "server_type": self._derive_server_type(private_server_link, place),
-                "bad": bad,
-                "cap": cap,
-                "disabled": disabled,
-                "alternate_launch": alternate,
-                "launch_priority": coerce_launch_priority(existing.get("launch_priority", DEFAULT_LAUNCH_PRIORITY)),
-                "skip_reconnect_on_log_disconnect": skip_reconnect_on_log_disconnect,
-                "discord_user_ids": normalize_discord_ids(existing.get("discord_user_ids")),
-            }
-        )
-        self.original_config[user_id] = updated
-
-        self.refresh_user_list()
-        QMessageBox.information(self, "Success", f"User {user_id} updated.")
-
-    def delete_selected_user(self) -> None:
-        if not self.selected_user_id:
-            return
-        user_id = str(self.selected_user_id)
-        info = self.original_config.get(user_id, {}) if isinstance(self.original_config, dict) else {}
-        username = str(info.get("username", f"User_{user_id}")) if isinstance(info, dict) else f"User_{user_id}"
-
-        reply = QMessageBox.question(
-            self,
-            "Confirm Delete",
-            f"Delete user {user_id} ({username})?\n\nThis cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        try:
-            self.original_config.pop(user_id, None)
-        except Exception:
-            pass
-        self.refresh_user_list()
-        self.cancel_edit()
-
-    # ---------------- Cookie extraction ----------------
-    def extract_cookie_from_browser(self) -> None:
-        try:
-            if bool(getattr(self, "alternate_chk", None) and self.alternate_chk.isChecked()):
-                QMessageBox.information(
-                    self,
-                    "Alternate Launch",
-                    "This account is set to Alternate launch mode.\n\nIt does not use cookies, so cookie extraction is disabled.",
-                )
-                return
-            self.browser_login_btn.setEnabled(False)
-            self.browser_login_btn.setText("Extracting...")
-            self.cookie_extractor.extract_cookie_async(
-                callback=self._on_cookie_extraction_complete,
-                parent_widget=self,
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to start cookie extraction: {e}")
-            self._reset_browser_button()
-
-    def _on_cookie_extraction_complete(self, cookie: str):
-        try:
-            if cookie:
-                self.cookie_input.setText(cookie)
-                QMessageBox.information(self, "Success", "Cookie extracted and filled.")
-            else:
-                QMessageBox.information(self, "Cancelled", "Cookie extraction was cancelled or failed.")
-        finally:
-            self._reset_browser_button()
-
-    def _reset_browser_button(self):
-        try:
-            self.browser_login_btn.setEnabled(True)
-            self.browser_login_btn.setText("Login (Extract Cookie)")
-        except Exception:
-            pass
-
-    # ---------------- Helpers ----------------
-    def _ui_log(self, message: str) -> None:
-        msg = str(message or "")
-        parent = self.parent()
-        add_log = getattr(parent, "add_log", None)
-        if callable(add_log):
-            QTimer.singleShot(0, lambda m=msg: add_log(m))
-        else:
-            try:
-                print(msg)
-            except Exception:
-                pass
-
-    def _default_place_id(self) -> str:
-        return "15532962292"
-
-    def _find_chrome_executable(self) -> Optional[str]:
-        try:
-            env_path = str(os.environ.get("CHROME_PATH", "") or "").strip()
-            if env_path and os.path.isfile(env_path):
-                return env_path
-        except Exception:
-            pass
-
-        candidates = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        ]
-        try:
-            local = os.environ.get("LOCALAPPDATA") or ""
-            if local:
-                candidates.append(os.path.join(local, "Google", "Chrome", "Application", "chrome.exe"))
-        except Exception:
-            pass
-
-        for p in candidates:
-            try:
-                if p and os.path.isfile(p):
-                    return p
-            except Exception:
-                continue
-
-        try:
-            import shutil
-
-            for name in ("chrome.exe", "chrome", "google-chrome"):
-                p = shutil.which(name)
-                if p and os.path.isfile(p):
-                    return p
-        except Exception:
-            pass
-
-        return None
-
-    def _pick_free_port(self) -> int:
-        import socket
-
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.bind(("127.0.0.1", 0))
-            return int(s.getsockname()[1])
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-
-    def _wait_for_chrome_debug(self, port: int, timeout_s: float = 10.0) -> bool:
-        deadline = time.time() + float(timeout_s or 0)
-        url = f"http://127.0.0.1:{int(port)}/json/version"
-        while time.time() < deadline:
-            try:
-                with urlopen(url, timeout=0.5) as resp:
-                    if int(getattr(resp, "status", 200) or 200) == 200:
-                        return True
-            except Exception:
-                time.sleep(0.2)
-        return False
-
-    def _open_logged_in_browser(self, uid: str, cookie: str, url: str, profile_dir: Optional[str] = None) -> None:
-        """
-        Launch a real Chrome process (remote debugging) and inject .ROBLOSECURITY into it.
-        This does NOT use CookieExtractor (separate workflow from cookie extraction).
-        """
-        uid = str(uid or "")
-        cookie = str(cookie or "").strip()
-        if normalize_roblosecurity_cookie_value is not None:
-            try:
-                cookie = normalize_roblosecurity_cookie_value(cookie)
-            except Exception:
-                cookie = str(cookie or "").strip()
-        url = str(url or "")
-
-        def _worker():
-            try:
-                chrome_exe = self._find_chrome_executable()
-                if not chrome_exe:
-                    self._ui_log("[Browser] Chrome not found. Set CHROME_PATH or install Google Chrome.")
-                    return
-
-                # Always use a temporary profile so browser data is not persisted.
-                try:
-                    import tempfile
-
-                    profile_dir_local = tempfile.mkdtemp(prefix=f"jaram_chrome_{uid}_")
-                except Exception:
-                    self._ui_log(f"[Browser] uid={uid} failed: could not create temp profile.")
-                    return
-
-                def _schedule_profile_cleanup(proc, profile_path: Optional[str]) -> None:
-                    if proc is None or not profile_path:
-                        return
-
-                    def _cleanup():
-                        try:
-                            proc.wait()
-                        except Exception:
-                            pass
-                        try:
-                            shutil.rmtree(profile_path, ignore_errors=True)
-                        except Exception:
-                            pass
-
-                    threading.Thread(target=_cleanup, daemon=True).start()
-
-                def _launch_with_profile(_profile_dir: Optional[str]) -> tuple[int, Optional[str], Optional[object]]:
-                    import subprocess
-
-                    port = self._pick_free_port()
-                    args = [
-                        chrome_exe,
-                        f"--remote-debugging-port={port}",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                        "--new-window",
-                        "https://www.roblox.com/",
-                    ]
-                    if _profile_dir:
-                        args.insert(2, f"--user-data-dir={_profile_dir}")
-                    try:
-                        proc = subprocess.Popen(
-                            args,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                        )
-                    except Exception:
-                        proc = subprocess.Popen(args)
-                    return port, _profile_dir, proc
-
-                port, used_profile, proc = _launch_with_profile(profile_dir_local)
-                _schedule_profile_cleanup(proc, used_profile)
-                if not self._wait_for_chrome_debug(port, timeout_s=8.0):
-                    try:
-                        tmp_profile = tempfile.mkdtemp(prefix=f"jaram_chrome_{uid}_")
-                    except Exception:
-                        tmp_profile = None
-
-                    if not tmp_profile:
-                        self._ui_log(f"[Browser] uid={uid} failed: could not create a temp Chrome profile.")
-                        return
-
-                    port, used_profile, proc = _launch_with_profile(tmp_profile)
-                    _schedule_profile_cleanup(proc, used_profile)
-                    if not self._wait_for_chrome_debug(port, timeout_s=8.0):
-                        self._ui_log(f"[Browser] uid={uid} failed: Chrome remote debug not reachable (port={port}).")
-                        return
-
-                from selenium.webdriver.chrome.options import Options
-                from selenium.webdriver.chrome.webdriver import WebDriver as ChromeWebDriver
-
-                opts = Options()
-                opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{int(port)}")
-
-                driver = ChromeWebDriver(options=opts)
-                try:
-                    driver.get("https://www.roblox.com/")
-                except Exception:
-                    pass
-
-                cookie_obj = {
-                    "name": ".ROBLOSECURITY",
-                    "value": cookie,
-                    "domain": ".roblox.com",
-                    "path": "/",
-                    "secure": True,
-                    "httpOnly": True,
-                }
-                try:
-                    try:
-                        driver.delete_cookie(".ROBLOSECURITY")
-                    except Exception:
-                        pass
-                    driver.add_cookie(cookie_obj)
-                except Exception:
-                    cookie_obj["domain"] = "roblox.com"
-                    driver.add_cookie(cookie_obj)
-
-                try:
-                    driver.get("https://www.roblox.com/home")
-                except Exception:
-                    pass
-                if url:
-                    try:
-                        driver.get(url)
-                    except Exception:
-                        pass
-
-                # Keep driver alive to avoid Chrome closing when the session ends/GC occurs.
-                try:
-                    UserManagementDialog._browser_driver_keepalive.append(driver)
-                except Exception:
-                    pass
-
-                last_cookie = cookie
-                if extract_roblosecurity_from_selenium_driver is not None:
-                    try:
-                        current_cookie = extract_roblosecurity_from_selenium_driver(driver)
-                    except Exception:
-                        current_cookie = None
-                    if current_cookie and current_cookie != last_cookie:
-                        last_cookie = current_cookie
-                        if persist_updated_cookie is not None:
-                            try:
-                                if persist_updated_cookie(self.config_manager, user_id=uid, new_cookie=last_cookie):
-                                    self._ui_log(f"[Cookie] uid={uid} updated from browser.")
-                                else:
-                                    self._ui_log(f"[Cookie] uid={uid} updated in browser, but failed to save (cookies locked?).")
-                            except Exception:
-                                pass
-
-                def _cookie_watch() -> None:
-                    nonlocal last_cookie
-                    while True:
-                        time.sleep(5.0)
-                        try:
-                            if extract_roblosecurity_from_selenium_driver is not None:
-                                cur = extract_roblosecurity_from_selenium_driver(driver)
-                            else:
-                                obj = driver.get_cookie(".ROBLOSECURITY")
-                                cur = str(obj.get("value") or "") if isinstance(obj, dict) else ""
-                        except Exception:
-                            break
-                        if not cur or cur == last_cookie:
-                            continue
-                        last_cookie = cur
-                        if persist_updated_cookie is None:
-                            continue
-                        try:
-                            if persist_updated_cookie(self.config_manager, user_id=uid, new_cookie=cur):
-                                self._ui_log(f"[Cookie] uid={uid} updated from browser.")
-                            else:
-                                self._ui_log(f"[Cookie] uid={uid} updated in browser, but failed to save (cookies locked?).")
-                        except Exception:
-                            pass
-
-                try:
-                    threading.Thread(target=_cookie_watch, daemon=True).start()
-                except Exception:
-                    pass
-
-                profile_label = "temp" if used_profile else "default"
-                self._ui_log(f"[Browser] uid={uid} opened (profile={profile_label})")
-
-            except Exception as e:
-                self._ui_log(f"[Browser] uid={uid} failed: {type(e).__name__}: {e}")
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _compute_browser_url(self, user_info: dict, mode: str) -> str:
-        if mode == "home":
-            return "https://www.roblox.com/home"
-
-        psl = str(user_info.get("private_server_link", "") or "").strip()
-        if psl:
-            return psl
-
-        place = str(user_info.get("place", "") or "").strip() or self._default_place_id()
-        if place.isdigit():
-            return f"https://www.roblox.com/games/{place}"
-        return place or "https://www.roblox.com/home"
-
-    def _manager_running(self) -> bool:
-        parent = self.parent()
-        wt = getattr(parent, "worker_thread", None)
-        try:
-            return bool(wt and wt.isRunning())
-        except Exception:
-            return False
-
-    def _is_uid_online_in_manager(self, uid: str) -> bool:
-        parent = self.parent()
-        wt = getattr(parent, "worker_thread", None)
-        if not wt or not getattr(wt, "manager", None) or not getattr(wt, "process_mgr", None):
-            return False
-        tracker = getattr(wt.manager, "process_tracker", None)
-        if not tracker:
-            return False
-        pids = (tracker.user_processes or {}).get(uid, []) or []
-        try:
-            return any(wt.process_mgr.verify_process_active(pid) for pid in pids)
-        except Exception:
-            return False
-
-    def _is_uid_online_in_stopped_state(self, uid: str) -> bool:
-        parent = self.parent()
-        state = getattr(parent, "_stopped_worker_state", None)
-        if not isinstance(state, dict):
-            return False
-        tracker = state.get("process_tracker") or {}
-        if not isinstance(tracker, dict):
-            return False
-        user_processes = tracker.get("user_processes") or {}
-        if not isinstance(user_processes, dict):
-            return False
-        pids = user_processes.get(str(uid), []) or []
-        if not isinstance(pids, (list, tuple, set)):
-            pids = [pids]
-        try:
-            import psutil
-        except Exception:
-            return False
-        for pid in pids:
-            try:
-                proc = psutil.Process(int(pid))
-                if str(proc.name()).lower() == "robloxplayerbeta.exe":
-                    return True
-            except Exception:
-                continue
-        return False
-
-    def _get_manual_launcher(self) -> GameLauncher:
-        if self._manual_launcher is not None:
-            return self._manual_launcher
-
-        self._manual_manager = RobloxManager(config_manager=self.config_manager)
-        self._manual_process_mgr = ProcessManager(getattr(self._manual_manager, "excluded_pid", 0) or 0)
-
-        timeouts = getattr(self._manual_manager, "timeouts", {}) or {}
-        try:
-            launch_delay = int(timeouts.get("launch_delay", 4) or 4)
-        except Exception:
-            launch_delay = 4
-        try:
-            initial_delay = int(timeouts.get("initial_delay", 4) or 4)
-        except Exception:
-            initial_delay = 4
-
-        self._manual_launcher = GameLauncher(
-            getattr(self._manual_manager, "target_place", self._default_place_id()),
-            self._manual_process_mgr,
-            getattr(self._manual_manager, "auth_handler", None),
-            getattr(self._manual_manager, "process_tracker", None),
-            getattr(self._manual_manager, "config_manager", self.config_manager),
-            launch_delay=launch_delay,
-            initial_delay=initial_delay,
-            log_fn=self._ui_log,
-        )
-        return self._manual_launcher
-
-
 class BorderRing(QWidget):
     """Transparent widget that draws a circular ring and ignores mouse events."""
     def __init__(self, diameter: int, border_px: int, colour: str, parent=None):
@@ -11026,6 +8361,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
     multi_instance_fix_result_signal = Signal(bool, str)
     autoitem_log_signal = Signal(str)
     autoitem_mouse_block_signal = Signal(bool)
+    autoitem_test_result_signal = Signal(bool)
     bes_log_signal = Signal(str)
     ocr_filter_alert_ui_signal = Signal(str)
     discord_control_log_signal = Signal(str)
@@ -11127,57 +8463,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self.cookie_extractor = CookieExtractor(self)
         self.skip_account_private_link_warning = False
         self.skip_account_public_place_warning = False
-        self._settings_baseline: Optional[dict] = None
-        self._settings_prompt_ready = False
-        self._tab_change_guard = False
         self._last_tab_index: Optional[int] = None
-        self._settings_label_map = {
-            "window_limit": "Window Limit",
-            "spares_mode": "Spares Mode",
-            "spares_fraction": "Spare Mode Split",
-            "roblox_window_geometry.enforce_on_launch": "Auto-fix Roblox Window Geometry",
-            "roblox_window_geometry.x": "Roblox Window X",
-            "roblox_window_geometry.y": "Roblox Window Y",
-            "roblox_window_geometry.w": "Roblox Window Width",
-            "roblox_window_geometry.h": "Roblox Window Height",
-            "timeouts.offline": "Restart Inactive After",
-            "timeouts.initial_delay": "Initial Launch Delay",
-            "timeouts.launch_delay": "Launch Delay",
-            "timeouts.strap_threshold": "Strap Limit",
-            "timeouts.handoff_lead": "Handoff Lead",
-            "timeouts.early_join_window": "Early-Join Window",
-            "timeout_monitor.kill_enabled": "Kill After Enabled",
-            "timeout_monitor.kill_timeout": "Kill After",
-            "timeout_monitor.poll_interval": "Poll Interval",
-            "alerts.webhook_url": "Webhook URL",
-            "alerts.blackout_ping": "Blackout Ping",
-            "alerts.cap_message": "CAP Message",
-            "alerts.bad_message": "BAD Message",
-            "alerts.hourly_users_report_enabled": "Hourly Users Report",
-            "alerts.hourly_users_report_interval_hours": "Hourly Users Report Interval",
-            "webhooks": "Webhooks",
-            "ui.webhooks_hidden_biomes": "Hidden Webhook Biome Columns",
-            "ui.show_tutorial_menu": "Show Tutorial Menu Item",
-            "misc.skip_webhook_unknown_context": "Skip Unknown-Context Webhooks",
-            "misc.log_confirmed_launch_mode": "Launch Next After Log Confirm",
-            "misc.bes_wait_for_username_in_logs": "Wait for BES Username Log",
-            "misc.disable_manager_bad_marking": "Disable Manager BAD Marking",
-            "misc.msedgewebview2_limiter_enabled": "Enable msedgewebview2 Limiter",
-            "misc.hide_discord_tabs": "Hide Discord Tab",
-            "misc.close_bootstrapper_error_popups": "Auto-Close Bootstrapper Error Popups",
-            "multiscope.merchant_webhook": "Merchant Webhook URL",
-            "multiscope.merchant_detection_mode": "Merchant Detection Mode",
-            "multiscope.enable_jester": "Enable Jester Pings",
-            "multiscope.enable_mari": "Enable Mari Pings",
-            "multiscope.enable_rin": "Enable Rin Pings",
-            "multiscope.jester_ping_type": "Jester Ping Type",
-            "multiscope.jester_ping_id": "Jester Ping ID",
-            "multiscope.mari_ping_type": "Mari Ping Type",
-            "multiscope.mari_ping_id": "Mari Ping ID",
-            "multiscope.rin_ping_type": "Rin Ping Type",
-            "multiscope.rin_ping_id": "Rin Ping ID",
-            "misc.disable_log_based_merchant_detection_when_ocr_merchants_enabled": "Disable Log Merchant Detection While OCR Merchants Active",
-        }
 
         # Anti-AFK engine instance (configured in setup_antiafk_tab)
         self.antiafk: Optional[AntiAFK] = None
@@ -11204,6 +8490,11 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self._last_multiscope_rows: Optional[list] = None
         self._ms_resume_grace_until: float = 0.0
         self._auto_item_antiafk_was_running: bool = False
+
+        # Captcha Solver Coordination (Sequential Queue)
+        self._captcha_queue: "queue.Queue[dict]" = queue.Queue()
+        self._captcha_worker_thread: Optional[threading.Thread] = None
+        self._captcha_lock = threading.Lock()
         self._auto_item_antiafk_pause_depth: int = 0
         self._auto_item_antiafk_pause_lock = threading.Lock()
 
@@ -11293,6 +8584,10 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self.discord_control_log_signal.connect(self._on_discord_control_log)
         self.discord_control_state_signal.connect(self._on_discord_control_state_changed)
         self.roblox_log_cleanup_result_signal.connect(self._on_roblox_log_cleanup_finished)
+        self.autoitem_test_result_signal.connect(self._on_auto_item_test_finished)
+        self._ratelimit_notified: Dict[str, float] = {}
+        self._ratelimit_notified_lock = threading.Lock()
+        webhook_gate.on_rate_limited = self._on_webhook_rate_limited
 
         self.setup_ui()
         try:
@@ -11308,14 +8603,11 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 app.installEventFilter(self)
         except Exception:
             pass
-        # NEW: add the Multiscope tab
-        self.setup_multiscope_tab()
         self.setup_timers()
         self._setup_roblox_log_cleanup()
         self._setup_discord_control_bridge()
         self._last_tab_index = self.tab_widget.currentIndex()
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
-        self._settings_prompt_ready = True
         QTimer.singleShot(0, self._maybe_prompt_cookie_encryption)
         QTimer.singleShot(0, self._maybe_autostart_discord_control_bot)
         self._restore_paused_manager_state_from_disk()
@@ -11383,80 +8675,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
 
     def setup_ui(self):
-        self.setWindowTitle("M.J.JARAM - Jirach1's Just Another Roblox Account Manager")
-        self.setGeometry(100, 100, 1100, 720)
-
-        icon_path = _get_icon_path()
-        if icon_path and os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-
-        header_layout = QHBoxLayout()
-
-        title_label = QLabel("M.J.JARAM - Jirach1's Just Another Roblox Account Manager")
-        title_font = QFont()
-        title_font.setPointSize(18)
-        title_font.setBold(True)
-        title_label.setFont(title_font)
-        header_layout.addWidget(title_label)
-
-        header_layout.addStretch()
-
-        self.start_btn = QPushButton("Start Manager")
-        self.start_btn.setProperty("class", "success")
-        self.start_btn.clicked.connect(self.start_manager)
-        header_layout.addWidget(self.start_btn)
-
-        self.pause_btn = QPushButton("Pause Manager")
-        self.pause_btn.setProperty("class", "warning")
-        self.pause_btn.setEnabled(False)
-        self.pause_btn.clicked.connect(self.toggle_pause_manager)
-        header_layout.addWidget(self.pause_btn)
-
-        self.stop_btn = QPushButton("Stop Manager")
-        self.stop_btn.setProperty("class", "danger")
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self.stop_manager)
-        header_layout.addWidget(self.stop_btn)
-
-        main_layout.addLayout(header_layout)
-
-        status_layout = QHBoxLayout()
-        self.status_label = QLabel("Status: Stopped")
-        self.status_label.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY}; font-weight: bold;")
-        status_layout.addWidget(self.status_label)
-
-        status_layout.addStretch()
-
-        self.uptime_label = QLabel("Uptime: 00:00:00")
-        status_layout.addWidget(self.uptime_label)
-
-        main_layout.addLayout(status_layout)
-
-        self.tab_widget = QTabWidget()
-        main_layout.addWidget(self.tab_widget)
-
-        self.setup_dashboard_tab()
-        self.setup_users_tab()
-        self.setup_accounts_tab()
-        self.setup_logs_tab()
-        self.setup_ocr_tab()
-        self.setup_antiafk_tab()
-        self.setup_auto_item_tab()
-        self.setup_bes_tab()
-        setup_TRIMMER_tab(self)
-        self.setup_settings_tab()
-        self.setup_discord_control_tab()
-
-        self.setup_menu_bar()
-
-        self.setStyleSheet(ModernStyle.get_stylesheet())
-
-        self.start_time = None
-        self.user_data = {}
+        """The window: sidebar, header and pages (ui_pages/)."""
+        ui_shell.setup_ui(self, _get_icon_path())
 
     def _discord_tabs_hidden_from_settings(self, settings: Optional[dict] = None) -> bool:
         if settings is None:
@@ -11468,147 +8688,18 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         if not isinstance(misc, dict):
             misc = {}
         defaults = self.config_manager.default_settings.get("misc", {}) or {}
-        return bool(misc.get("hide_discord_tabs", defaults.get("hide_discord_tabs", True)))
+        return bool(misc.get("hide_discord_tabs", defaults.get("hide_discord_tabs", False)))
 
     def _apply_discord_tabs_visibility(self, hide_tabs: Optional[bool] = None) -> None:
+        """Settings > Advanced > Hide the Discord bot page: hides it in the sidebar (and leaves it if it is open)."""
         if hide_tabs is None:
             hide_tabs = self._discord_tabs_hidden_from_settings()
-        tab_widget = getattr(self, "tab_widget", None)
         idx = getattr(self, "discord_control_tab_index", None)
-        if tab_widget is None or idx is None:
+        if idx is None:
             return
-        try:
-            if idx < 0 or idx >= tab_widget.count():
-                return
-        except Exception:
-            return
-        visible = not bool(hide_tabs)
-        try:
-            tab_widget.setTabVisible(idx, visible)
-        except Exception:
-            try:
-                tab_widget.setTabEnabled(idx, visible)
-            except Exception:
-                return
-        if visible or tab_widget.currentIndex() != idx:
-            return
-        for candidate in (self.settings_tab_index, self.dashboard_tab_index, 0):
-            try:
-                if candidate is None or candidate == idx:
-                    continue
-                if candidate < 0 or candidate >= tab_widget.count():
-                    continue
-                if hasattr(tab_widget, "isTabVisible") and not tab_widget.isTabVisible(candidate):
-                    continue
-                if not tab_widget.isTabEnabled(candidate):
-                    continue
-                tab_widget.setCurrentIndex(candidate)
-                return
-            except Exception:
-                continue
-
-    def setup_menu_bar(self):
-        menubar = self.menuBar()
-
-        file_menu = menubar.addMenu("File")
-
-        manage_users_action = file_menu.addAction("Manage Users")
-        manage_users_action.triggered.connect(self.open_user_management)
-
-        config_location_action = file_menu.addAction("Show Config Location")
-        config_location_action.triggered.connect(self.show_config_location)
-
-        cookie_encryption_action = file_menu.addAction("Cookie Encryption...")
-        cookie_encryption_action.triggered.connect(self.show_cookie_encryption_dialog)
-
-        file_menu.addSeparator()
-
-        exit_action = file_menu.addAction("Exit")
-        exit_action.triggered.connect(self.close)
-
-        extras_menu = menubar.addMenu("Extras")
-
-        # Live-updated counters (persisted by MultiScope)
-        self._extras_found_counter_action = extras_menu.addAction("All-time found: Biomes 0 | Merchants 0")
-        self._extras_found_counter_action.setEnabled(False)
-        try:
-            extras_menu.aboutToShow.connect(self._refresh_extras_found_counters)
-        except Exception:
-            pass
-
-        found_stats_action = extras_menu.addAction("Found Stats…")
-        found_stats_action.triggered.connect(self.show_found_stats_window)
-
-        extras_menu.addSeparator()
-
-        multi_instance_action = extras_menu.addAction("Roblox Multi-Instance")
-        multi_instance_action.setToolTip("Allow multiple Roblox Player instances to run at the same time")
-        multi_instance_action.triggered.connect(self.show_multi_instance_window)
-
-        heap_action = extras_menu.addAction("Raise Instance Limit (Desktop Heap)")
-        heap_action.setToolTip(
-            "Raise the Windows interactive desktop heap so more than ~15 Roblox windows "
-            "can run at once. Sets SharedSection to 128 MB. Needs admin + a reboot."
-        )
-        heap_action.triggered.connect(self._apply_desktop_heap)
-
-        ram_export_action = extras_menu.addAction("RAM Export")
-        ram_export_action.triggered.connect(self.show_ram_export_window)
-
-        utilities_action = extras_menu.addAction("Utilities")
-        utilities_action.triggered.connect(self.show_utilities_window)
-
-        extras_menu.addSeparator()
-        self._merchant_fix_action = extras_menu.addAction("Merchant Fix (Block assetdelivery)")
-        self._merchant_fix_action.setCheckable(True)
-        self._merchant_fix_action.setToolTip(
-            "Null-route assetdelivery.roblox.com via the hosts file and clear the "
-            "Roblox asset cache. Requires running as Administrator."
-        )
-        try:
-            import merchant_fix as _merchant_fix
-            self._merchant_fix_action.setChecked(bool(_merchant_fix.is_enabled()))
-        except Exception:
-            pass
-        self._merchant_fix_action.triggered.connect(self._toggle_merchant_fix)
-
-        log_cleanup_action = extras_menu.addAction("Roblox Log Cleanup")
-        log_cleanup_action.setToolTip("Delete Roblox log files after they have been inactive for a configured time")
-        log_cleanup_action.triggered.connect(self.show_roblox_log_cleanup_window)
-
-        help_menu = menubar.addMenu("Help")
-
-        self._tutorial_menu_action = help_menu.addAction("Tutorial")
-        self._tutorial_menu_action.triggered.connect(self.open_help_link)
-        self._tutorial_menu_sep = help_menu.addSeparator()
-
-        credits_action = help_menu.addAction("Credits")
-        credits_action.triggered.connect(self.show_credits)
-
-        about_action = help_menu.addAction("About")
-        about_action.triggered.connect(self.show_about)
-
-        help_menu.addSeparator()
-        # Hidden until a check actually finds something newer.
-        self._update_menu_action = help_menu.addAction("Update available")
-        self._update_menu_action.setVisible(False)
-        self._update_menu_action.triggered.connect(self._open_update_url)
-        check_updates_action = help_menu.addAction("Check for Updates")
-        check_updates_action.triggered.connect(self.check_for_updates_manual)
-        self._update_url = ""
-        self._update_thread = None
-        # Silent background check on startup; the manual action reports either way.
-        QTimer.singleShot(3000, self.check_for_updates_startup)
-
-        show_tutorial = False
-        try:
-            settings = self.config_manager.peek_settings() or {}
-            ui = settings.get("ui", {}) or {}
-            if isinstance(ui, dict):
-                show_tutorial = bool(ui.get("show_tutorial_menu", False))
-        except Exception:
-            show_tutorial = False
-        self._apply_tutorial_menu_visibility(show_tutorial)
+        self.tab_widget.setTabVisible(idx, not hide_tabs)
+        if hide_tabs and self.tab_widget.currentIndex() == idx:
+            self.tab_widget.setCurrentIndex(self.settings_tab_index or 0)
 
     def _toggle_merchant_fix(self, checked: bool) -> None:
         try:
@@ -11752,111 +8843,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             self, "Raise Instance Limit",
             f"Applied: desktop heap {target_kb} KB.\n\nReboot for it to take effect. "
             "After reboot your instance ceiling is RAM, not the ~15 heap limit.")
-
-    def show_multi_instance_window(self) -> None:
-        """Show the Extras dialog used to control Roblox's singleton guard."""
-        self._refresh_multi_instance_process_snapshot()
-        dialog = getattr(self, "_multi_instance_dialog", None)
-        if dialog is not None:
-            try:
-                self._update_multi_instance_dialog()
-                dialog.show()
-                dialog.raise_()
-                dialog.activateWindow()
-                return
-            except Exception:
-                self._multi_instance_dialog = None
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Roblox Multi-Instance")
-        dialog.setModal(False)
-        dialog.setMinimumWidth(560)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("Roblox Multi-Instance")
-        title_font = QFont()
-        title_font.setPointSize(16)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        layout.addWidget(title)
-
-        description = QLabel(
-            "M.J.JARAM keeps Roblox's singleton guard active so multiple accounts can run at once. "
-            "If Roblox was opened before the guard was ready, use Fix to close those sessions "
-            "and recreate the guard cleanly."
-        )
-        description.setWordWrap(True)
-        description.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
-        layout.addWidget(description)
-
-        checkbox = QCheckBox("Enable Roblox multi-instancing")
-        checkbox.setChecked(bool(getattr(self, "_multi_instance_enabled", False)))
-        checkbox.toggled.connect(self._set_multi_instance_enabled)
-        layout.addWidget(checkbox)
-        self._multi_instance_checkbox = checkbox
-
-        status_group = QGroupBox("Current status")
-        status_layout = QGridLayout(status_group)
-        status_layout.setHorizontalSpacing(18)
-        status_layout.setVerticalSpacing(8)
-
-        status_layout.addWidget(QLabel("Setting:"), 0, 0)
-        self._multi_instance_setting_label = QLabel()
-        status_layout.addWidget(self._multi_instance_setting_label, 0, 1)
-
-        status_layout.addWidget(QLabel("Singleton guard:"), 1, 0)
-        self._multi_instance_guard_label = QLabel()
-        status_layout.addWidget(self._multi_instance_guard_label, 1, 1)
-
-        status_layout.addWidget(QLabel("Roblox processes:"), 2, 0)
-        self._multi_instance_process_label = QLabel()
-        status_layout.addWidget(self._multi_instance_process_label, 2, 1)
-
-        status_layout.addWidget(QLabel("Overall:"), 3, 0)
-        self._multi_instance_status_label = QLabel()
-        self._multi_instance_status_label.setWordWrap(True)
-        status_layout.addWidget(self._multi_instance_status_label, 3, 1)
-        status_layout.setColumnStretch(1, 1)
-        layout.addWidget(status_group)
-
-        self._multi_instance_issue_label = QLabel()
-        self._multi_instance_issue_label.setWordWrap(True)
-        self._multi_instance_issue_label.setStyleSheet(
-            f"color:{ModernStyle.TEXT_PRIMARY}; background-color:{ModernStyle.SURFACE_VARIANT}; "
-            f"border:1px solid {ModernStyle.WARNING}; border-radius:6px; padding:10px;"
-        )
-        layout.addWidget(self._multi_instance_issue_label)
-
-        button_row = QHBoxLayout()
-        self._multi_instance_refresh_btn = QPushButton("Refresh Guard")
-        self._multi_instance_refresh_btn.clicked.connect(self._refresh_multi_instance_clicked)
-        button_row.addWidget(self._multi_instance_refresh_btn)
-
-        self._multi_instance_fix_btn = QPushButton("Fix: Close Roblox && Refresh")
-        self._multi_instance_fix_btn.setProperty("class", "danger")
-        self._multi_instance_fix_btn.clicked.connect(self._fix_multi_instance)
-        button_row.addWidget(self._multi_instance_fix_btn)
-        button_row.addStretch()
-
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(dialog.close)
-        button_row.addWidget(close_btn)
-        layout.addLayout(button_row)
-
-        self._multi_instance_dialog = dialog
-        self._update_multi_instance_dialog()
-        # Size only after the layout is populated. Resizing earlier can request
-        # a geometry smaller than Qt's final DPI-scaled minimum and causes
-        # QWindowsWindow::setGeometry warnings on high-DPI monitors.
-        dialog.adjustSize()
-        size_hint = dialog.sizeHint()
-        dialog.resize(max(580, size_hint.width()), max(440, size_hint.height() + 24))
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
 
     @staticmethod
     def _roblox_process_pids() -> List[int]:
@@ -12734,40 +9720,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         dlg.exec()
 
-    def show_ram_export_window(self):
-        if self._ram_export_dialog is None:
-            dlg = QDialog(self)
-            dlg.setWindowTitle("RAM Export")
-            dlg.resize(700, 520)
-
-            layout = QVBoxLayout(dlg)
-            if self._ram_export_widget is None:
-                self._ram_export_widget = self.setup_RAMEXPORT_tab()
-            layout.addWidget(self._ram_export_widget)
-
-            self._ram_export_dialog = dlg
-
-        self._ram_export_dialog.show()
-        self._ram_export_dialog.raise_()
-        self._ram_export_dialog.activateWindow()
-
-    def show_utilities_window(self):
-        if self._utilities_dialog is None:
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Utilities")
-            dlg.resize(950, 720)
-
-            layout = QVBoxLayout(dlg)
-            if self._utilities_widget is None:
-                self._utilities_widget = build_utilities_widget(self)
-            layout.addWidget(self._utilities_widget)
-
-            self._utilities_dialog = dlg
-
-        self._utilities_dialog.show()
-        self._utilities_dialog.raise_()
-        self._utilities_dialog.activateWindow()
-
     def _get_roblox_log_cleanup_config(self) -> dict:
         try:
             settings = self.config_manager.peek_settings() or {}
@@ -12948,1023 +9900,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         else:
             status.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
         status.setText(summary)
-
-    def show_roblox_log_cleanup_window(self) -> None:
-        dialog = self._roblox_log_cleanup_dialog
-        if dialog is not None:
-            self._update_roblox_log_cleanup_status()
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
-            return
-
-        config = self._get_roblox_log_cleanup_config()
-        self._roblox_log_cleanup_config = config
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Roblox Log Cleanup")
-        dialog.setModal(False)
-        dialog.setMinimumWidth(610)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("Roblox Log Cleanup")
-        title_font = QFont()
-        title_font.setPointSize(16)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        layout.addWidget(title)
-
-        description = QLabel(
-            "Automatically delete Roblox .log files after they have gone unmodified for the "
-            "configured amount of time. Recent logs, non-log files, folders, and nested files "
-            "are left untouched."
-        )
-        description.setWordWrap(True)
-        description.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
-        layout.addWidget(description)
-
-        folder_group = QGroupBox("Roblox log folder")
-        folder_layout = QVBoxLayout(folder_group)
-        folder_label = QLabel(os.path.abspath(os.fspath(get_roblox_logs_dir())))
-        folder_label.setWordWrap(True)
-        folder_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        folder_layout.addWidget(folder_label)
-        layout.addWidget(folder_group)
-
-        settings_group = QGroupBox("Cleanup settings")
-        settings_layout = QFormLayout(settings_group)
-
-        enabled_checkbox = QCheckBox("Enable automatic cleanup")
-        enabled_checkbox.setChecked(bool(config.get("enabled", False)))
-        settings_layout.addRow("Mode:", enabled_checkbox)
-        self._roblox_log_cleanup_enabled_checkbox = enabled_checkbox
-
-        age_row_widget = QWidget()
-        age_row = QHBoxLayout(age_row_widget)
-        age_row.setContentsMargins(0, 0, 0, 0)
-        age_spin = QSpinBox()
-        age_spin.setRange(1, 9999)
-        age_spin.setValue(int(config.get("inactive_age", 24)))
-        age_spin.setToolTip("A file is eligible only when its last-modified age reaches this value")
-        age_row.addWidget(age_spin)
-
-        unit_combo = QComboBox()
-        for label, value in (("Minutes", "minutes"), ("Hours", "hours"), ("Days", "days")):
-            unit_combo.addItem(label, value)
-        unit_index = unit_combo.findData(str(config.get("inactive_unit", "hours")))
-        unit_combo.setCurrentIndex(max(0, unit_index))
-        age_row.addWidget(unit_combo)
-        age_row.addStretch(1)
-        settings_layout.addRow("Delete after:", age_row_widget)
-        self._roblox_log_cleanup_age_spin = age_spin
-        self._roblox_log_cleanup_unit_combo = unit_combo
-        layout.addWidget(settings_group)
-
-        status_label = QLabel()
-        status_label.setWordWrap(True)
-        self._roblox_log_cleanup_status_label = status_label
-        layout.addWidget(status_label)
-
-        button_row = QHBoxLayout()
-        clean_now_button = QPushButton("Clean Now")
-        clean_now_button.setEnabled(not self._roblox_log_cleanup_in_progress)
-        clean_now_button.clicked.connect(lambda: self._run_roblox_log_cleanup(force=True))
-        self._roblox_log_cleanup_run_button = clean_now_button
-        button_row.addWidget(clean_now_button)
-        button_row.addStretch(1)
-
-        close_button = QPushButton("Close")
-        close_button.clicked.connect(dialog.close)
-        button_row.addWidget(close_button)
-        layout.addLayout(button_row)
-
-        enabled_checkbox.toggled.connect(self._save_roblox_log_cleanup_settings)
-        age_spin.editingFinished.connect(self._save_roblox_log_cleanup_settings)
-        unit_combo.currentIndexChanged.connect(self._save_roblox_log_cleanup_settings)
-
-        self._roblox_log_cleanup_dialog = dialog
-        self._update_roblox_log_cleanup_status()
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
-
-    def setup_dashboard_tab(self):
-        dashboard_widget = QWidget()
-        layout = QVBoxLayout(dashboard_widget)
-
-        stats_group = QGroupBox("System Statistics")
-        stats_layout = QGridLayout(stats_group)
-
-        self.total_users_label = QLabel("0")
-        self.total_users_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {ModernStyle.PRIMARY};")
-        stats_layout.addWidget(QLabel("Total Users:"), 0, 0)
-        stats_layout.addWidget(self.total_users_label, 0, 1)
-
-        self.active_users_label = QLabel("0")
-        self.active_users_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {ModernStyle.SECONDARY};")
-        stats_layout.addWidget(QLabel("Active Users:"), 0, 2)
-        stats_layout.addWidget(self.active_users_label, 0, 3)
-
-        self.total_processes_label = QLabel("0")
-        self.total_processes_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {ModernStyle.WARNING};")
-        stats_layout.addWidget(QLabel("Total Processes:"), 1, 0)
-        stats_layout.addWidget(self.total_processes_label, 1, 1)
-
-        self.pending_restarts_label = QLabel("0")
-        self.pending_restarts_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {ModernStyle.ERROR};")
-        stats_layout.addWidget(QLabel("Pending Restarts:"), 1, 2)
-        stats_layout.addWidget(self.pending_restarts_label, 1, 3)
-
-        layout.addWidget(stats_group)
-
-        actions_group = QGroupBox("Quick Actions")
-        actions_layout = QHBoxLayout(actions_group)
-
-        restart_all_btn = QPushButton("Restart All Sessions")
-        restart_all_btn.clicked.connect(self.restart_all_sessions)
-        actions_layout.addWidget(restart_all_btn)
-
-        kill_all_btn = QPushButton("Kill All Processes")
-        kill_all_btn.setProperty("class", "danger")
-        kill_all_btn.clicked.connect(self.kill_all_processes)
-        actions_layout.addWidget(kill_all_btn)
-
-        actions_layout.addStretch()
-
-        layout.addWidget(actions_group)
-
-        activity_group = QGroupBox("Recent Activity")
-        activity_layout = QVBoxLayout(activity_group)
-
-        self.activity_list = QTextEdit()
-        self.activity_list.setMaximumHeight(200)
-        self.activity_list.setReadOnly(True)
-        activity_layout.addWidget(self.activity_list)
-
-        layout.addWidget(activity_group)
-
-        layout.addStretch()
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(dashboard_widget)
-        self.dashboard_tab_index = self.tab_widget.addTab(scroll, "Dashboard")
-
-    def setup_users_tab(self):
-        users_widget = QWidget()
-        layout = QVBoxLayout(users_widget)
-
-        self.users_table = QTableWidget()
-        self.users_table.setColumnCount(13)
-        self.users_table.setHorizontalHeaderLabels([
-            "User ID","Username","Private Server","Place",
-            "Server",               # ← NEW
-            "Status","PIDs","TTL(s)","Created","Last Active",
-            "Inactive For", "Anti-AFK Age", "Actions"
-        ])
-
-        header = self.users_table.horizontalHeader()
-        # NOTE: ResizeToContents becomes extremely expensive with many rows + frequent updates.
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)       # Server
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)       # Created
-        header.setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)           # Last Active
-        header.setSectionResizeMode(10, QHeaderView.ResizeMode.Fixed)            # Inactive For
-        header.setSectionResizeMode(11, QHeaderView.ResizeMode.Interactive)      # Anti-AFK Age
-        header.setSectionResizeMode(12, QHeaderView.ResizeMode.Fixed)            # Actions
-
-        self.users_table.setColumnWidth(0, 100)
-        self.users_table.setColumnWidth(1, 160)
-        self.users_table.setColumnWidth(2, 200)
-        self.users_table.setColumnWidth(3, 100)
-        self.users_table.setColumnWidth(4, 120)
-        self.users_table.setColumnWidth(5, 110)
-        self.users_table.setColumnWidth(6, 160)
-        self.users_table.setColumnWidth(7, 100)   # TTL(s)
-        self.users_table.setColumnWidth(8, 100)   # Created
-        self.users_table.setColumnWidth(10, 160)  # Inactive For
-        self.users_table.setColumnWidth(11, 120)  # Anti-AFK Age
-        self.users_table.setColumnWidth(12, 260)  # Actions
-        self.users_table.verticalHeader().setDefaultSectionSize(60)
-        self.users_table.setWordWrap(False)
-        try:
-            self.users_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        except Exception:
-            pass
-
-        try:
-            self.users_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-            self.users_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        except Exception:
-            pass
-        self.users_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-
-        layout.addWidget(self.users_table)
-
-        controls_layout = QHBoxLayout()
-        refresh_users_btn = QPushButton("Refresh")
-        refresh_users_btn.clicked.connect(self.refresh_users)
-        controls_layout.addWidget(refresh_users_btn)
-
-        add_user_btn = QPushButton("Modify Users")
-        add_user_btn.clicked.connect(self.open_user_management)
-        controls_layout.addWidget(add_user_btn)
-
-        show_selected_btn = QPushButton("Show Selected")
-        show_selected_btn.clicked.connect(self.show_selected_user_window)
-        controls_layout.addWidget(show_selected_btn)
-
-        kill_selected_btn = QPushButton("Kill Selected")
-        kill_selected_btn.setProperty("class", "danger")
-        kill_selected_btn.clicked.connect(self.kill_selected_user)
-        controls_layout.addWidget(kill_selected_btn)
-
-        controls_layout.addStretch()
-        layout.addLayout(controls_layout)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(users_widget)
-        self.users_tab_index = self.tab_widget.addTab(scroll, "Users")
-
-    def setup_accounts_tab(self):
-        """Account management tab."""
-        accounts_widget = QWidget()
-        layout = QVBoxLayout(accounts_widget)
-
-        header_label = QLabel("Account Management")
-        header_label.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {ModernStyle.TEXT_PRIMARY}; padding: 10px 0;")
-        layout.addWidget(header_label)
-
-        main_layout = QHBoxLayout()
-
-        # Left form
-        form_widget = QWidget()
-        form_widget.setMaximumWidth(400)
-        form_layout = QVBoxLayout(form_widget)
-
-        form_title = QLabel("Add New Account")
-        form_title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {ModernStyle.TEXT_PRIMARY}; padding: 5px 0;")
-        form_layout.addWidget(form_title)
-
-        self.account_user_id = QLineEdit()
-        self.account_user_id.setPlaceholderText("User ID (e.g., 123456789)")
-        form_layout.addWidget(QLabel("User ID:"))
-        form_layout.addWidget(self.account_user_id)
-
-        self.account_username = QLineEdit()
-        self.account_username.setPlaceholderText("Username (e.g., PlayerName)")
-        form_layout.addWidget(QLabel("Username:"))
-        form_layout.addWidget(self.account_username)
-
-        form_layout.addWidget(QLabel("Server Type:"))
-        server_layout = QHBoxLayout()
-        self.account_private_radio = QRadioButton("Private Server")
-        self.account_public_radio = QRadioButton("Public Server")
-        self.account_private_radio.setChecked(True)
-        server_layout.addWidget(self.account_private_radio)
-        server_layout.addWidget(self.account_public_radio)
-        form_layout.addLayout(server_layout)
-
-        self.account_private_link = QLineEdit()
-        self.account_private_link.setPlaceholderText("Private server link")
-        self.account_private_link_label = QLabel("Private Server Link:")
-        form_layout.addWidget(self.account_private_link_label)
-        form_layout.addWidget(self.account_private_link)
-
-        self.account_place_id = QLineEdit()
-        self.account_place_id.setPlaceholderText("Place ID")
-        self.account_place_id_label = QLabel("Place ID:")
-        form_layout.addWidget(self.account_place_id_label)
-        form_layout.addWidget(self.account_place_id)
-        self.account_place_id_label.hide()
-        self.account_place_id.hide()
-
-        self.account_cookie = QLineEdit()
-        self.account_cookie.setPlaceholderText("ROBLOSECURITY cookie")
-        form_layout.addWidget(QLabel("Cookie:"))
-        cookie_layout = QHBoxLayout()
-        cookie_layout.addWidget(self.account_cookie)
-
-        self.account_browser_login_btn = QPushButton("Login with Browser")
-        self.account_browser_login_btn.setToolTip("Open browser to login and automatically extract cookie")
-        self.account_browser_login_btn.clicked.connect(self.extract_account_cookie_from_browser)
-        self.account_browser_login_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background-color: {ModernStyle.SURFACE_VARIANT};
-                color: {ModernStyle.TEXT_PRIMARY};
-                border: 1px solid {ModernStyle.BORDER};
-                padding: 8px 16px;
-                border-radius: 6px;
-                font-weight: 500;
-                font-size: 13px;
-                min-height: 28px;
-                min-width: 160px;
-            }}
-            QPushButton:hover {{
-                background-color: {ModernStyle.BORDER};
-            }}
-            """
-        )
-        cookie_layout.addWidget(self.account_browser_login_btn)
-        form_layout.addLayout(cookie_layout)
-
-        flags_row = QWidget()
-        flags_layout = QVBoxLayout(flags_row)
-        flags_layout.setContentsMargins(0, 0, 0, 0)
-        flags_layout.setSpacing(4)
-
-        flags_top = QHBoxLayout()
-        flags_top.setContentsMargins(0, 0, 0, 0)
-
-        self.account_disabled = QCheckBox("Disable this account")
-        flags_top.addWidget(self.account_disabled)
-
-        flags_top.addSpacing(52)
-
-        self.account_alternate_launch = QCheckBox("Alternate")
-        self.account_alternate_launch.setToolTip(
-            "Alternate launch mode (no cookies required).\n"
-            "Make sure any window open with the account is closed before launching with JARAM"
-        )
-        try:
-            self.account_alternate_launch.toggled.connect(self._on_account_alternate_launch_toggled)
-        except Exception:
-            pass
-        flags_top.addWidget(self.account_alternate_launch)
-
-        flags_top.addStretch(1)
-        flags_layout.addLayout(flags_top)
-
-        self.account_skip_reconnect_on_log_disconnect = QCheckBox("Disable log reconnects")
-        self.account_skip_reconnect_on_log_disconnect.setToolTip(
-            "When enabled, this account will not auto-reconnect after log disconnects."
-        )
-        flags_bottom = QHBoxLayout()
-        flags_bottom.setContentsMargins(0, 0, 0, 0)
-        flags_bottom.addWidget(self.account_skip_reconnect_on_log_disconnect)
-        flags_bottom.addStretch(1)
-        flags_layout.addLayout(flags_bottom)
-        form_layout.addWidget(flags_row)
-
-        button_layout = QHBoxLayout()
-        self.add_account_btn = QPushButton("Add Account")
-        self.add_account_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background-color: {ModernStyle.PRIMARY};
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {ModernStyle.PRIMARY_VARIANT};
-            }}
-            QPushButton:pressed {{
-                background-color: {ModernStyle.PRIMARY_VARIANT};
-            }}
-            """
-        )
-        self.add_account_btn.clicked.connect(self.add_account)
-        button_layout.addWidget(self.add_account_btn)
-
-        self.clear_form_btn = QPushButton("Clear")
-        self.clear_form_btn.clicked.connect(self.clear_account_form)
-        button_layout.addWidget(self.clear_form_btn)
-
-        form_layout.addLayout(button_layout)
-        form_layout.addStretch()
-
-        self.account_private_radio.toggled.connect(self.on_account_server_type_changed)
-
-        main_layout.addWidget(form_widget)
-
-        # Right list
-        list_widget = QWidget()
-        list_layout = QVBoxLayout(list_widget)
-
-        list_title = QLabel("Existing Accounts")
-        list_title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {ModernStyle.TEXT_PRIMARY}; padding: 5px 0;")
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.addWidget(list_title, 0, Qt.AlignmentFlag.AlignTop)
-        title_row.addStretch()
-        disable_selected_btn = QPushButton("Disable Select")
-        disable_selected_btn.clicked.connect(lambda: self.disable_selected_users(self.accounts_list))
-        delete_selected_btn = QPushButton("Delete Select")
-        delete_selected_btn.clicked.connect(lambda: self.delete_selected_accounts(self.accounts_list))
-        toggle_selected_btn = QPushButton("Toggle Status")
-        toggle_selected_btn.clicked.connect(lambda: self.toggle_selected_users_status(self.accounts_list))
-        clear_flags_widget = QWidget()
-        clear_flags_layout = QGridLayout(clear_flags_widget)
-        clear_flags_layout.setContentsMargins(0, 0, 0, 0)
-        clear_flags_layout.setSpacing(0)
-
-        self.clear_all_flags_btn = QPushButton("Clear All Flags")
-        self.clear_all_flags_btn.clicked.connect(self._clear_bad_flags)
-        clear_flags_layout.addWidget(self.clear_all_flags_btn, 0, 0)
-
-        self.clear_flags_menu_btn = _FlagMenuButton(clear_flags_widget)
-        self.clear_flags_menu_btn.setToolTip("Clear only one type of flag")
-        self.clear_flags_menu_btn.setFixedSize(16, 16)
-        self.clear_flags_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        clear_flags_menu = QMenu(self.clear_flags_menu_btn)
-        clear_cap_action = clear_flags_menu.addAction("Clear All CAP Flags")
-        clear_cap_action.triggered.connect(self._clear_all_cap_flags)
-        clear_bad_action = clear_flags_menu.addAction("Clear All BAD Flags")
-        clear_bad_action.triggered.connect(self._clear_all_bad_flags)
-        self.clear_flags_menu_btn.setMenu(clear_flags_menu)
-        clear_flags_layout.addWidget(
-            self.clear_flags_menu_btn,
-            0,
-            0,
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
-        )
-        clear_sel_bad_btn = QPushButton("Clear Select Flag")
-        clear_sel_bad_btn.clicked.connect(self._clear_selected_bad_flags)
-        title_row.addWidget(disable_selected_btn, 0, Qt.AlignmentFlag.AlignTop)
-        title_row.addWidget(delete_selected_btn, 0, Qt.AlignmentFlag.AlignTop)
-        title_row.addWidget(toggle_selected_btn, 0, Qt.AlignmentFlag.AlignTop)
-        title_row.addWidget(clear_flags_widget, 0, Qt.AlignmentFlag.AlignTop)
-        title_row.addWidget(clear_sel_bad_btn, 0, Qt.AlignmentFlag.AlignTop)
-        list_layout.addLayout(title_row)
-
-        self.accounts_search_input = QLineEdit()
-        self.accounts_search_input.setPlaceholderText("Search accounts by User ID or username...")
-        self.accounts_search_input.setClearButtonEnabled(True)
-        self.accounts_search_input.textChanged.connect(lambda _t: self.refresh_accounts_list())
-        list_layout.addWidget(self.accounts_search_input)
-
-        self.accounts_list = QTableWidget()
-        self.accounts_list.setColumnCount(6)
-        self.accounts_list.setHorizontalHeaderLabels(["User ID", "Username", "Server Type", "Status", "Actions", "Delete"])
-        header = self.accounts_list.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self.accounts_list.setColumnWidth(1, 120)
-        self.accounts_list.setColumnWidth(4, 90)
-        self.accounts_list.setColumnWidth(5, 80)
-        self._accounts_activity_delegate = _ActivityDotDelegate(self.accounts_list)
-        self.accounts_list.setItemDelegateForColumn(3, self._accounts_activity_delegate)
-        self.accounts_list.verticalHeader().setDefaultSectionSize(35)
-        try:
-            self.accounts_list.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-            self.accounts_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        except Exception:
-            pass
-        self.accounts_list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-
-        list_layout.addWidget(self.accounts_list)
-
-        main_layout.addWidget(list_widget)
-        layout.addLayout(main_layout)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(accounts_widget)
-        self.accounts_tab_index = self.tab_widget.addTab(scroll, "Accounts")
-        self.refresh_accounts_list()
-
-    def setup_logs_tab(self):
-        logs_widget = QWidget()
-        layout = QVBoxLayout(logs_widget)
-
-        self.log_display = QTextEdit()
-        self.log_display.setReadOnly(True)
-        self.log_display.setFont(QFont("Consolas", 10))
-        try:
-            # Prevent long-run UI slowdowns from unbounded QTextDocument growth.
-            self.log_display.document().setMaximumBlockCount(5000)
-        except Exception:
-            pass
-        layout.addWidget(self.log_display)
-
-        controls_layout = QHBoxLayout()
-
-        clear_logs_btn = QPushButton("Clear Logs")
-        clear_logs_btn.clicked.connect(self.clear_logs)
-        controls_layout.addWidget(clear_logs_btn)
-
-        save_logs_btn = QPushButton("Save Logs")
-        save_logs_btn.clicked.connect(self.save_logs)
-        controls_layout.addWidget(save_logs_btn)
-
-        controls_layout.addStretch()
-        
-        self.watch_hit_chk = QCheckBox("WATCH-HIT/SCAN-TRACE logs", self)
-        self.watch_hit_chk.setChecked(False)  # hidden by default
-        controls_layout.addWidget(self.watch_hit_chk)
-
-        self.scan_trace_chk = self.watch_hit_chk
-
-        self.multiscope_biome_chk = QCheckBox("MultiScope BIOME logs", self)
-        self.multiscope_biome_chk.setChecked(False)
-        controls_layout.addWidget(self.multiscope_biome_chk)
-
-        self.launch_debug_chk = QCheckBox("Launch Debug", self)
-        self.launch_debug_chk.setChecked(False)  # hidden by default
-        controls_layout.addWidget(self.launch_debug_chk)
-         
-        self.auto_scroll_checkbox = QCheckBox("Auto-scroll")
-        self.auto_scroll_checkbox.setChecked(True)
-        self.log_autoscroll = bool(self.auto_scroll_checkbox.isChecked())
-        self.auto_scroll_checkbox.toggled.connect(lambda checked: setattr(self, "log_autoscroll", bool(checked)))
-        controls_layout.addWidget(self.auto_scroll_checkbox)
-
-        layout.addLayout(controls_layout)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(logs_widget)
-        self.tab_widget.addTab(scroll, "Logs")
-
-    def setup_ocr_tab(self):
-        ocr_widget = QWidget()
-        layout = QVBoxLayout(ocr_widget)
-
-        # Show the OCR runtime device
-        self.ocr_device_label = QLabel()
-        self.ocr_device_label.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY}; font-weight: bold;")
-        layout.addWidget(self.ocr_device_label)
-        self._update_ocr_device_label()
-
-        toggles_row = QHBoxLayout()
-        self.ocr_enable_chk = QCheckBox("Enabled")
-        self.ocr_enable_chk.toggled.connect(self._on_ocr_enabled_toggled)
-        toggles_row.addWidget(self.ocr_enable_chk)
-        toggles_row.addStretch()
-        layout.addLayout(toggles_row)
-
-        controls_group = QGroupBox("Capture | OCR")
-        controls_form = QFormLayout(controls_group)
-
-        self.ocr_workers_spin = QSpinBox(); self.ocr_workers_spin.setRange(1, 16)
-        self.ocr_workers_spin.valueChanged.connect(self._on_ocr_settings_changed)
-        self.ocr_max_caps_spin = QSpinBox(); self.ocr_max_caps_spin.setRange(1, 60)
-        self.ocr_max_caps_spin.setToolTip("Maximum number of window captures per OCR batch.")
-        self.ocr_max_caps_spin.valueChanged.connect(self._on_ocr_settings_changed)
-        self.ocr_batch_delay_spin = QDoubleSpinBox(); self.ocr_batch_delay_spin.setRange(0.0, 60.0); self.ocr_batch_delay_spin.setDecimals(2); self.ocr_batch_delay_spin.setSingleStep(0.1); self.ocr_batch_delay_spin.setSuffix(" s")
-        self.ocr_batch_delay_spin.setToolTip("Minimum delay between OCR capture batches (lower = more frequent batches).")
-        self.ocr_batch_delay_spin.valueChanged.connect(self._on_ocr_settings_changed)
-        self.ocr_preprocess_chk = QCheckBox("Use preprocessing")
-        self.ocr_preprocess_chk.toggled.connect(self._on_ocr_settings_changed)
-        self.ocr_frame_diff_tol_spin = QSpinBox(); self.ocr_frame_diff_tol_spin.setRange(0, 100); self.ocr_frame_diff_tol_spin.setSuffix(" %")
-        self.ocr_frame_diff_tol_spin.setToolTip("Skip OCR when the chat frame changes by at most this amount compared to the previous frame.")
-        self.ocr_frame_diff_tol_spin.valueChanged.connect(self._on_ocr_settings_changed)
-        self.ocr_device_combo = QComboBox()
-        self.ocr_device_combo.currentIndexChanged.connect(self._on_ocr_settings_changed)
-        self._load_ocr_device_choices()
-
-        controls_form.addRow("OCR workers:", self.ocr_workers_spin)
-        controls_form.addRow("Max captures / batch:", self.ocr_max_caps_spin)
-        controls_form.addRow("Batch delay:", self.ocr_batch_delay_spin)
-        controls_form.addRow("Preprocess chat image:", self.ocr_preprocess_chk)
-        controls_form.addRow("Processor:", self.ocr_device_combo)
-        controls_form.addRow("Skip OCR if frame change ≤:", self.ocr_frame_diff_tol_spin)
-
-        layout.addWidget(controls_group)
-
-        btn_row = QHBoxLayout()
-        calibrate_btn = QPushButton("Calibrate chat area")
-        calibrate_btn.clicked.connect(self.calibrate_ocr_roi)
-        calibrate_btn.setToolTip("Select 6 lines of roblox chat from the bottom")
-        preview_btn = QPushButton("Preview chat")
-        preview_btn.clicked.connect(self.show_ocr_preview)
-        preview_btn.setToolTip("Preview OCR output using the calibrated chat area.")
-        compare_btn = QPushButton("Chat frame compare")
-        compare_btn.clicked.connect(self.test_ocr_frame_compare)
-        compare_btn.setToolTip("Compare frame similarity using the calibrated chat area.")
-        btn_row.addWidget(calibrate_btn)
-        btn_row.addWidget(preview_btn)
-        btn_row.addWidget(compare_btn)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
-
-        self.ocr_roi_label = QLabel("Chat ROI: not calibrated")
-        layout.addWidget(self.ocr_roi_label)
-
-        filters_group = QGroupBox("Filters")
-        filters_layout = QVBoxLayout(filters_group)
-        self.ocr_filter_table = QTableWidget()
-        self.ocr_filter_table.setColumnCount(7)
-        self.ocr_filter_table.setHorizontalHeaderLabels(["Enabled", "Name", "R", "G", "B", "Tol", "Settings"])
-        self.ocr_filter_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.ocr_filter_table.setMinimumHeight(380)
-        self.ocr_filter_table.setShowGrid(False)
-        self.ocr_filter_table.setAlternatingRowColors(False)
-        header = self.ocr_filter_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.ocr_filter_table.setColumnWidth(0, 90)
-        for col in range(2, 6):
-            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
-            self.ocr_filter_table.setColumnWidth(col, 95)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-        self.ocr_filter_table.setColumnWidth(6, 120)
-        vh = self.ocr_filter_table.verticalHeader()
-        vh.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        vh.setDefaultSectionSize(62)
-        vh.setMinimumSectionSize(62)
-        # Match the Auto Item "Items" table styling for a consistent look.
-        self.ocr_filter_table.setStyleSheet(
-            f"""
-            QTableWidget {{
-                background-color: {ModernStyle.SURFACE};
-                gridline-color: transparent;
-            }}
-
-            QTableWidget::item {{
-                border: none;
-                padding: 0px;
-            }}
-
-            QTableWidget QLineEdit {{
-                background-color: {ModernStyle.SURFACE};
-                border: 2px solid {ModernStyle.BORDER};
-                border-radius: 6px;
-                padding: 6px 10px;
-                min-height: 36px;
-                color: {ModernStyle.TEXT_PRIMARY};
-            }}
-
-            QTableWidget QSpinBox {{
-                background-color: {ModernStyle.SURFACE};
-                border: 2px solid {ModernStyle.BORDER};
-                border-radius: 6px;
-                padding: 6px 30px 6px 10px; /* reserve space for arrows */
-                min-height: 36px;
-                color: {ModernStyle.TEXT_PRIMARY};
-            }}
-
-            QTableWidget QSpinBox::up-button, QTableWidget QSpinBox::down-button {{
-                subcontrol-origin: border;
-                width: 22px;
-                border-left: 1px solid {ModernStyle.BORDER};
-                background-color: {ModernStyle.SURFACE_VARIANT};
-            }}
-            QTableWidget QSpinBox::up-button {{
-                subcontrol-position: top right;
-                border-top-right-radius: 6px;
-            }}
-            QTableWidget QSpinBox::down-button {{
-                subcontrol-position: bottom right;
-                border-bottom-right-radius: 6px;
-            }}
-            QTableWidget QSpinBox::up-button:hover, QTableWidget QSpinBox::down-button:hover {{
-                background-color: {ModernStyle.BORDER};
-            }}
-
-            QTableWidget QCheckBox {{
-                padding: 0px;
-                margin: 0px;
-                background: transparent;
-            }}
-
-            QTableWidget QPushButton {{
-                background-color: {ModernStyle.PRIMARY};
-                color: {ModernStyle.TEXT_PRIMARY};
-                border: none;
-                padding: 8px 16px;
-                border-radius: 6px;
-                font-weight: 500;
-                min-width: 80px;
-                min-height: 28px;
-            }}
-
-            QTableWidget QPushButton:hover {{
-                background-color: {ModernStyle.PRIMARY_VARIANT};
-            }}
-
-            QTableWidget QPushButton:disabled {{
-                background-color: {ModernStyle.SURFACE_VARIANT};
-                color: {ModernStyle.TEXT_SECONDARY};
-            }}
-            """
-        )
-        filters_layout.addWidget(self.ocr_filter_table)
-        # Changes are wired from per-cell widgets (see _add_filter_row).
-
-        filter_btns = QHBoxLayout()
-        add_filter_btn = QPushButton("Add Filter")
-        add_filter_btn.clicked.connect(lambda: (self._add_filter_row(), self._on_ocr_settings_changed()))
-        remove_filter_btn = QPushButton("Remove Selected")
-        remove_filter_btn.clicked.connect(lambda: (self._remove_selected_filter_rows(), self._on_ocr_settings_changed()))
-        shared_areas_btn = QPushButton("Shared Areas")
-        shared_areas_btn.clicked.connect(self._open_ocr_shared_areas_dialog)
-        filter_users_btn = QPushButton("Filter Users")
-        filter_users_btn.clicked.connect(self._open_ocr_filter_user_assignments_dialog)
-        filter_presets_btn = QPushButton("Preset Filters")
-        filter_presets_btn.clicked.connect(self._open_ocr_filter_presets_dialog)
-        filter_btns.addWidget(add_filter_btn)
-        filter_btns.addWidget(remove_filter_btn)
-        filter_btns.addWidget(shared_areas_btn)
-        filter_btns.addWidget(filter_users_btn)
-        filter_btns.addWidget(filter_presets_btn)
-        filter_btns.addStretch()
-        filters_layout.addLayout(filter_btns)
-        layout.addWidget(filters_group)
-
-        self.ocr_status_label = QLabel("Status: Stopped")
-        self.ocr_status_label.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY}; font-weight: bold;")
-        layout.addWidget(self.ocr_status_label)
-
-        self.ocr_log_text_chk = QCheckBox("OCR text (debug)")
-        self.ocr_log_text_chk.setToolTip("Logs the raw OCR output text to the OCR log (can be spammy).")
-        self.ocr_log_text_chk.toggled.connect(self._on_ocr_settings_changed)
-
-        self.ocr_loop_logs_chk = QCheckBox("Show loop logs")
-        self.ocr_loop_logs_chk.setToolTip("Show per-loop capture stats (messages like [Loop N] ...).")
-        self.ocr_loop_logs_chk.toggled.connect(self._on_ocr_settings_changed)
-
-        log_group = QGroupBox("OCR Log")
-        log_layout = QVBoxLayout(log_group)
-        log_layout.setSpacing(4)
-        self.ocr_log_box = QTextEdit()
-        self.ocr_log_box.setReadOnly(True)
-        self.ocr_log_box.setFont(QFont("Consolas", 10))
-        self.ocr_log_box.setMinimumHeight(260)
-        try:
-            self.ocr_log_box.document().setMaximumBlockCount(5000)
-        except Exception:
-            pass
-        self.ocr_auto_scroll_chk = QCheckBox("Auto-scroll")
-        self.ocr_auto_scroll_chk.setChecked(True)
-        self.ocr_auto_scroll_chk.toggled.connect(lambda checked: setattr(self, "ocr_log_autoscroll", bool(checked)))
-        clear_log_btn = QPushButton("Clear OCR Log")
-        clear_log_btn.clicked.connect(self.clear_ocr_log)
-        log_layout.addWidget(self.ocr_log_box)
-        log_options_row = QHBoxLayout()
-        log_options_row.setSpacing(8)
-        log_options_row.addWidget(self.ocr_log_text_chk)
-        log_options_row.addWidget(self.ocr_loop_logs_chk)
-        log_options_row.addWidget(self.ocr_auto_scroll_chk)
-        log_options_row.addStretch()
-        log_options_row.addWidget(clear_log_btn)
-        log_layout.addLayout(log_options_row)
-        layout.addWidget(log_group)
-
-        # Footer: reset OCR settings to defaults
-        footer = QHBoxLayout()
-        footer.addStretch()
-        reset_ocr_btn = QPushButton("Restore OCR Defaults")
-        reset_ocr_btn.clicked.connect(self._reset_ocr_to_defaults)
-        footer.addWidget(reset_ocr_btn)
-        layout.addLayout(footer)
-
-        layout.addStretch()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(ocr_widget)
-        self.tab_widget.addTab(scroll, "OCR")
-
-    def setup_antiafk_tab(self):
-        antiafk_widget = QWidget()
-        layout = QVBoxLayout(antiafk_widget)
-
-        info_group = QGroupBox("Roblox Anti-AFK")
-        info_layout = QVBoxLayout(info_group)
-        desc = QLabel(
-            "Anti-AFK keeps your Roblox sessions active by periodically sending key presses.\n"
-            "This works on all Roblox windows and may require administrator privileges."
-        )
-        desc.setWordWrap(True)
-        desc.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
-        info_layout.addWidget(desc)
-        layout.addWidget(info_group)
-
-        settings_group = QGroupBox("Settings")
-        settings_layout = QGridLayout(settings_group)
-
-        # Interval + quick presets
-        settings_layout.addWidget(QLabel("Action Interval (seconds):"), 0, 0)
-        interval_row_widget = QWidget()
-        interval_row = QHBoxLayout(interval_row_widget)
-        interval_row.setContentsMargins(0, 0, 0, 0)
-        self.antiafk_interval_spin = QSpinBox()
-        self.antiafk_interval_spin.setRange(5, 3600)
-        self.antiafk_interval_spin.setValue(120)
-        interval_row.addWidget(self.antiafk_interval_spin)
-        for seconds, label in ((120, "2m"), (300, "5m"), (600, "10m")):
-            btn = QPushButton(label)
-            btn.setFixedWidth(40)
-            btn.clicked.connect(lambda _, s=seconds: self.antiafk_interval_spin.setValue(s))
-            interval_row.addWidget(btn)
-        interval_row.addStretch()
-        settings_layout.addWidget(interval_row_widget, 0, 1)
-
-        # Action type
-        settings_layout.addWidget(QLabel("Action Type:"), 1, 0)
-        self.antiafk_action_combo = QComboBox()
-        self.antiafk_action_combo.addItems(["space", "ws", "zoom", "AutoReconnect"])
-        settings_layout.addWidget(self.antiafk_action_combo, 1, 1)
-
-        # Key delay (ms) for key holds / multi-key actions
-        settings_layout.addWidget(QLabel("Key Delay (ms):"), 2, 0)
-        self.antiafk_alt_delay_spin = QSpinBox()
-        self.antiafk_alt_delay_spin.setRange(10, 5000)
-        self.antiafk_alt_delay_spin.setSingleStep(10)
-        self.antiafk_alt_delay_spin.setValue(400)
-        settings_layout.addWidget(self.antiafk_alt_delay_spin, 2, 1)
-
-        # Use AutoReconnect in main menu
-        self.antiafk_menu_autoreconnect_chk = QCheckBox("Use AutoReconnect when in main menu")
-        settings_layout.addWidget(self.antiafk_menu_autoreconnect_chk, 3, 0, 1, 2)
-
-        self.antiafk_debug_timing_chk = QCheckBox("Debug timings")
-        self.antiafk_debug_timing_chk.setToolTip(
-            "Log Anti-AFK sweep, batch, and action-step durations to the Anti-AFK log."
-        )
-        settings_layout.addWidget(self.antiafk_debug_timing_chk, 4, 0, 1, 2)
-
-        layout.addWidget(settings_group)
-
-        alerts_group = QGroupBox("Alerts")
-        alerts_layout = QGridLayout(alerts_group)
-        try:
-            alerts_layout.setContentsMargins(10, 10, 10, 10)
-            alerts_layout.setHorizontalSpacing(12)
-            alerts_layout.setVerticalSpacing(6)
-        except Exception:
-            pass
-
-        self.antiafk_alert_sound_chk = QCheckBox("Sound Alert")
-        self.antiafk_alert_sound_chk.setToolTip("Play a sound before Anti-AFK actions.")
-        alerts_layout.addWidget(self.antiafk_alert_sound_chk, 0, 0)
-
-        lead_label = QLabel("Lead time (seconds):")
-        lead_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        alerts_layout.addWidget(lead_label, 0, 1)
-
-        self.antiafk_alert_tooltip_chk = QCheckBox("Message Alert")
-        self.antiafk_alert_tooltip_chk.setToolTip("Show a tooltip in the center of the monitor before Anti-AFK actions.")
-        alerts_layout.addWidget(self.antiafk_alert_tooltip_chk, 1, 0)
-
-        self.antiafk_alert_lead_spin = QDoubleSpinBox()
-        self.antiafk_alert_lead_spin.setRange(0.0, 60.0)
-        self.antiafk_alert_lead_spin.setSingleStep(0.5)
-        self.antiafk_alert_lead_spin.setDecimals(1)
-        self.antiafk_alert_lead_spin.setValue(3.0)
-        self.antiafk_alert_lead_spin.setToolTip("How many seconds before Anti-AFK to trigger the alert.")
-        alerts_layout.addWidget(self.antiafk_alert_lead_spin, 1, 1)
-
-        layout.addWidget(alerts_group)
-
-        # BES integration: unthrottle targets shortly before sending Anti-AFK input.
-        pacify_group = QGroupBox("Throttle Pacify (BES)")
-        pacify_layout = QGridLayout(pacify_group)
-
-        self.antiafk_unthrottle_chk = QCheckBox("Temporarily unthrottle before Anti-AFK actions")
-        pacify_layout.addWidget(self.antiafk_unthrottle_chk, 0, 0, 1, 2)
-
-        pacify_layout.addWidget(QLabel("Unthrottle lead time (seconds):"), 1, 0)
-        self.antiafk_unthrottle_lead_spin = QDoubleSpinBox()
-        self.antiafk_unthrottle_lead_spin.setRange(0.0, 15.0)
-        self.antiafk_unthrottle_lead_spin.setSingleStep(0.5)
-        self.antiafk_unthrottle_lead_spin.setDecimals(1)
-        self.antiafk_unthrottle_lead_spin.setValue(3.0)
-        pacify_layout.addWidget(self.antiafk_unthrottle_lead_spin, 1, 1)
-        try:
-            w = int(
-                max(
-                    self.antiafk_unthrottle_lead_spin.sizeHint().width(),
-                    self.antiafk_unthrottle_lead_spin.minimumSizeHint().width(),
-                )
-            )
-            if hasattr(self, "antiafk_alert_lead_spin") and self.antiafk_alert_lead_spin:
-                self.antiafk_alert_lead_spin.setMinimumWidth(max(0, w))
-        except Exception:
-            pass
-
-        pacify_layout.addWidget(QLabel("Unthrottle batch size (windows):"), 2, 0)
-        self.antiafk_unthrottle_batch_spin = QSpinBox()
-        self.antiafk_unthrottle_batch_spin.setRange(1, 50)
-        self.antiafk_unthrottle_batch_spin.setValue(5)
-        pacify_layout.addWidget(self.antiafk_unthrottle_batch_spin, 2, 1)
-
-        hint = QLabel("When BES throttling is enabled, Anti-AFK will unthrottle targets in batches before acting.")
-        hint.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
-        pacify_layout.addWidget(hint, 3, 0, 1, 2)
-
-        layout.addWidget(pacify_group)
-
-        # Status/log view specific to Anti-AFK
-        status_group = QGroupBox("Anti-AFK Log")
-        status_layout = QVBoxLayout(status_group)
-        self.antiafk_status_box = QTextEdit()
-        self.antiafk_status_box.setReadOnly(True)
-        self.antiafk_status_box.setFont(QFont("Consolas", 10))
-        try:
-            self.antiafk_status_box.document().setMaximumBlockCount(5000)
-        except Exception:
-            pass
-        status_layout.addWidget(self.antiafk_status_box)
-        layout.addWidget(status_group)
-
-        # Control row: enable toggle + actions + defaults
-        btn_row = QHBoxLayout()
-        self.antiafk_enable_chk = QCheckBox("Enable Anti-AFK (while manager is running)")
-        btn_row.addWidget(self.antiafk_enable_chk)
-        btn_row.addStretch()
-        self.antiafk_test_btn = QPushButton("Test Action")
-        self.antiafk_test_btn.clicked.connect(self._on_antiafk_test)
-        self.antiafk_show_btn = QPushButton("Show Roblox")
-        self.antiafk_show_btn.clicked.connect(self._on_antiafk_show)
-        self.antiafk_hide_btn = QPushButton("Hide Roblox")
-        self.antiafk_hide_btn.clicked.connect(self._on_antiafk_hide)
-        reset_btn = QPushButton("Restore Anti-AFK Defaults")
-        reset_btn.clicked.connect(self._reset_antiafk_to_defaults)
-        btn_row.addWidget(self.antiafk_test_btn)
-        btn_row.addWidget(self.antiafk_show_btn)
-        btn_row.addWidget(self.antiafk_hide_btn)
-        btn_row.addWidget(reset_btn)
-        layout.addLayout(btn_row)
-
-        layout.addStretch()
-
-        # Wire up engine + config
-        settings_data = self.config_manager.load_settings() or {}
-        antiafk_cfg = settings_data.get("antiafk", {}) or {}
-        self.antiafk = AntiAFK(parent=self, config=antiafk_cfg)
-
-        # Connect callbacks so worker threads report via Qt signals
-        self.antiafk.status_callback = self._emit_antiafk_status
-        self.antiafk.button_state_callback = self._emit_antiafk_state
-        self.antiafk.touch_callback = self._emit_antiafk_touch
-        try:
-            self.antiafk.pre_action_callback = self._emit_antiafk_pre_action
-        except Exception:
-            pass
-        self.antiafk.is_pid_in_menu_callback = self._is_pid_in_menu
-        self.antiafk.bes_hold_unthrottled_callback = self._antiafk_bes_hold_unthrottled
-        self.antiafk.bes_release_hold_callback = self._antiafk_bes_release_hold
-
-        # Apply config to UI without triggering change handlers
-        self._loading_antiafk_settings = True
-        try:
-            cfg = self.antiafk.config or {}
-            self._multi_instance_enabled = bool(cfg.get("multi_instance_enabled", False))
-            self.antiafk_interval_spin.setValue(int(cfg.get("antiafk_interval", 120)))
-            self.antiafk_action_combo.setCurrentText(cfg.get("antiafk_action", "space"))
-            self.antiafk_alt_delay_spin.setValue(int(cfg.get("antiafk_alt_delay_ms", 400)))
-            self.antiafk_menu_autoreconnect_chk.setChecked(bool(cfg.get("antiafk_menu_autoreconnect", False)))
-            self.antiafk_debug_timing_chk.setChecked(bool(cfg.get("antiafk_dev_mode", False)))
-            self.antiafk_enable_chk.setChecked(bool(cfg.get("antiafk_enabled", False)))
-            self.antiafk_alert_sound_chk.setChecked(bool(cfg.get("antiafk_alert_sound", False)))
-            self.antiafk_alert_tooltip_chk.setChecked(bool(cfg.get("antiafk_alert_tooltip", False)))
-            try:
-                self.antiafk_alert_lead_spin.setValue(float(cfg.get("antiafk_alert_lead_s", 3.0) or 0.0))
-            except Exception:
-                self.antiafk_alert_lead_spin.setValue(3.0)
-            self.antiafk_unthrottle_chk.setChecked(bool(cfg.get("antiafk_unthrottle_enabled", False)))
-            try:
-                self.antiafk_unthrottle_batch_spin.setValue(int(cfg.get("antiafk_unthrottle_batch_size", 5) or 5))
-            except Exception:
-                self.antiafk_unthrottle_batch_spin.setValue(5)
-            try:
-                self.antiafk_unthrottle_lead_spin.setValue(float(cfg.get("antiafk_unthrottle_lead_s", 3.0) or 0.0))
-            except Exception:
-                self.antiafk_unthrottle_lead_spin.setValue(3.0)
-        finally:
-            self._loading_antiafk_settings = False
-
-        # React to UI changes
-        self.antiafk_interval_spin.valueChanged.connect(self._on_antiafk_ui_changed)
-        self.antiafk_action_combo.currentTextChanged.connect(self._on_antiafk_ui_changed)
-        self.antiafk_alt_delay_spin.valueChanged.connect(self._on_antiafk_ui_changed)
-        self.antiafk_menu_autoreconnect_chk.toggled.connect(self._on_antiafk_ui_changed)
-        self.antiafk_debug_timing_chk.toggled.connect(self._on_antiafk_ui_changed)
-        self.antiafk_alert_sound_chk.toggled.connect(self._on_antiafk_ui_changed)
-        self.antiafk_alert_tooltip_chk.toggled.connect(self._on_antiafk_ui_changed)
-        self.antiafk_alert_lead_spin.valueChanged.connect(self._on_antiafk_ui_changed)
-        self.antiafk_unthrottle_chk.toggled.connect(self._on_antiafk_ui_changed)
-        self.antiafk_unthrottle_batch_spin.valueChanged.connect(self._on_antiafk_ui_changed)
-        self.antiafk_unthrottle_lead_spin.valueChanged.connect(self._on_antiafk_ui_changed)
-        self.antiafk_enable_chk.toggled.connect(self._on_antiafk_ui_changed)
-
-        # Ensure initial engine config (including multi-instance) is applied
-        self._on_antiafk_ui_changed()
-        QTimer.singleShot(0, self._restore_multi_instance_state)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(antiafk_widget)
-        self.tab_widget.addTab(scroll, "Anti AFK")
 
     def _emit_antiafk_status(self, message: str):
         """Called from AntiAFK worker threads to forward status messages."""
@@ -14579,12 +10514,11 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             # If the manager is running, keep Anti-AFK running state in sync with the toggle.
             if self._is_manager_running():
                 self._run_antiafk_async("toggle_antiafk", enabled_flag)
-
-            # Persist Anti-AFK settings to disk so they survive relaunch.
-            self._schedule_antiafk_save()
         except Exception:
-            # AntiAFK will log detailed errors via its own log_error method.
+            # AntiAFK will log detailed errors via its own log_error method (e.g. its worker is not running yet).
             pass
+        # Persist even when the engine could not take the change, so it survives relaunch.
+        self._schedule_antiafk_save()
 
     def _save_antiafk_settings(self):
         """Persist Anti-AFK-related settings into settings.json."""
@@ -14668,21 +10602,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         # Apply + persist + sync running state
         self._on_antiafk_ui_changed()
-
-    def _on_antiafk_start(self):
-        """Start the Anti-AFK loop with current settings."""
-        if not self.antiafk:
-            return
-        # Ensure engine has latest values and they are saved
-        self._on_antiafk_ui_changed()
-        self._run_antiafk_async("toggle_antiafk", True)
-
-    def _on_antiafk_stop(self):
-        """Stop the Anti-AFK loop."""
-        if not self.antiafk:
-            return
-        self._run_antiafk_async("toggle_antiafk", False)
-        self._schedule_antiafk_save()
 
     def _menu_state_is_fresh_for_pid(self, pid: int, menu_ts: float, tracker=None) -> bool:
         try:
@@ -14963,325 +10882,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
     # Auto Item tab + engine
     # ------------------------
 
-    def setup_auto_item_tab(self):
-        auto_widget = QWidget()
-        layout = QVBoxLayout(auto_widget)
-
-        info_group = QGroupBox("Auto Item")
-        info_layout = QVBoxLayout(info_group)
-        desc = QLabel(
-            "Automatically uses configured items for selected users.\n"
-            "Coordinates are stored relative to each Roblox window (client area)."
-        )
-        desc.setWordWrap(True)
-        desc.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
-        info_layout.addWidget(desc)
-        layout.addWidget(info_group)
-
-        settings_group = QGroupBox("Settings")
-        settings_layout = QGridLayout(settings_group)
-
-        self.auto_item_enable_chk = QCheckBox("Enable Auto-Item (while manager is running)")
-        settings_layout.addWidget(self.auto_item_enable_chk, 0, 0, 1, 2)
-
-        settings_layout.addWidget(QLabel("Tick interval (seconds):"), 1, 0)
-        self.auto_item_tick_spin = QDoubleSpinBox()
-        self.auto_item_tick_spin.setRange(0.2, 60.0)
-        self.auto_item_tick_spin.setDecimals(2)
-        self.auto_item_tick_spin.setSingleStep(0.1)
-        self.auto_item_tick_spin.setValue(1.0)
-        settings_layout.addWidget(self.auto_item_tick_spin, 1, 1)
-
-        settings_layout.addWidget(QLabel("Click/paste delay (seconds):"), 2, 0)
-        self.auto_item_delay_spin = QDoubleSpinBox()
-        self.auto_item_delay_spin.setRange(0.01, 2.0)
-        self.auto_item_delay_spin.setDecimals(2)
-        self.auto_item_delay_spin.setSingleStep(0.05)
-        self.auto_item_delay_spin.setValue(0.2)
-        settings_layout.addWidget(self.auto_item_delay_spin, 2, 1)
-
-        self.auto_item_disable_mouse_chk = QCheckBox("Disable user mouse movement during Auto-Item")
-        settings_layout.addWidget(self.auto_item_disable_mouse_chk, 3, 0, 1, 2)
-        try:
-            self._update_auto_item_disable_mouse_tooltip()
-        except Exception:
-            pass
-
-        settings_layout.addWidget(QLabel("Toggle hotkey:"), 4, 0)
-        self.auto_item_hotkey_edit = QKeySequenceEdit()
-        self.auto_item_hotkey_edit.setToolTip("Global hotkey to toggle Auto-Item enable/disable (default: Ctrl+Alt+Space).")
-        try:
-            self.auto_item_hotkey_edit.setKeySequence(QKeySequence("Ctrl+Alt+Space"))
-        except Exception:
-            pass
-        settings_layout.addWidget(self.auto_item_hotkey_edit, 4, 1)
-
-        self.auto_item_test_btn = QPushButton("Test Auto-Item (first selected user)")
-        self.auto_item_test_btn.setToolTip("Runs the configured automation once on the first selected user window.")
-        self.auto_item_test_btn.clicked.connect(self._auto_item_test_once)
-        settings_layout.addWidget(self.auto_item_test_btn, 5, 0, 1, 2)
-
-        layout.addWidget(settings_group)
-
-        coords_group = QGroupBox("Coordinates")
-        coords_layout = QGridLayout(coords_group)
-
-        self._auto_item_coord_edits = {}
-        self._auto_item_coords = {}
-
-        def _add_coord_row(row: int, key: str, label: str):
-            coords_layout.addWidget(QLabel(label + ":"), row, 0)
-            le = QLineEdit()
-            le.setReadOnly(True)
-            le.setPlaceholderText("not set")
-            coords_layout.addWidget(le, row, 1)
-            btn = QPushButton("Capture")
-            btn.clicked.connect(lambda _, k=key: self._auto_item_capture_coord(k))
-            coords_layout.addWidget(btn, row, 2)
-            self._auto_item_coord_edits[key] = le
-
-        _add_coord_row(0, "inv_button", "Inventory button")
-        _add_coord_row(1, "items_tab", "Items tab")
-        _add_coord_row(2, "search_box", "Search box")
-        _add_coord_row(3, "query_pos", "Query/result click")
-        _add_coord_row(4, "amount_box", "Amount box")
-        _add_coord_row(5, "use_button", "Use button")
-        _add_coord_row(6, "close_button", "Close button")
-
-        # Conditional click
-        self.auto_item_cond_enable_chk = QCheckBox("Enable conditional click (pixel color match)")
-        coords_layout.addWidget(self.auto_item_cond_enable_chk, 7, 0, 1, 3)
-
-        coords_layout.addWidget(QLabel("Conditional point:"), 8, 0)
-        self.auto_item_cond_point_le = QLineEdit()
-        self.auto_item_cond_point_le.setReadOnly(True)
-        self.auto_item_cond_point_le.setPlaceholderText("not set")
-        coords_layout.addWidget(self.auto_item_cond_point_le, 8, 1)
-        self.auto_item_cond_capture_btn = QPushButton("Capture + Sample Color")
-        self.auto_item_cond_capture_btn.clicked.connect(lambda: self._auto_item_capture_coord("conditional_point", sample_color=True))
-        coords_layout.addWidget(self.auto_item_cond_capture_btn, 8, 2)
-
-        coords_layout.addWidget(QLabel("Expected color (#RRGGBB):"), 9, 0)
-        self.auto_item_cond_color_le = QLineEdit("#FFFFFF")
-        coords_layout.addWidget(self.auto_item_cond_color_le, 9, 1)
-        coords_layout.addWidget(QLabel("Tolerance:"), 9, 2)
-        self.auto_item_cond_tol_spin = QSpinBox()
-        self.auto_item_cond_tol_spin.setRange(0, 255)
-        self.auto_item_cond_tol_spin.setValue(10)
-        coords_layout.addWidget(self.auto_item_cond_tol_spin, 9, 3)
-
-        hint = QLabel("Capture takes a screenshot of a Roblox window; click the screenshot to set the coordinate.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
-        coords_layout.addWidget(hint, 10, 0, 1, 4)
-
-        layout.addWidget(coords_group)
-
-        items_group = QGroupBox("Items (order matters)")
-        items_layout = QVBoxLayout(items_group)
-
-        self.auto_item_table = QTableWidget()
-        self.auto_item_table.setColumnCount(7)
-        self.auto_item_table.setHorizontalHeaderLabels(["Enabled", "Item", "Amount", "Cooldown (s)", "Biomes", "Users", "Alert"])
-        self.auto_item_table.setShowGrid(False)
-        self.auto_item_table.setAlternatingRowColors(False)
-        header = self.auto_item_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-        vh = self.auto_item_table.verticalHeader()
-        vh.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        vh.setDefaultSectionSize(62)
-        self.auto_item_table.setColumnWidth(0, 80)
-        self.auto_item_table.setColumnWidth(2, 95)
-        self.auto_item_table.setColumnWidth(3, 120)
-        self.auto_item_table.setColumnWidth(4, 120)
-        self.auto_item_table.setColumnWidth(5, 140)
-        self.auto_item_table.setColumnWidth(6, 140)
-        # Keep per-item alert controls behind the access gate.
-        try:
-            self.auto_item_table.setColumnHidden(6, not _bm_relaxed())
-        except Exception:
-            pass
-        # Compact + consistent controls inside the table (avoid clipped borders inside cells).
-        self.auto_item_table.setStyleSheet(
-            f"""
-            QTableWidget {{
-                background-color: {ModernStyle.SURFACE};
-                gridline-color: transparent;
-            }}
-
-            QTableWidget::item {{
-                border: none;
-                padding: 0px;
-            }}
-
-            QTableWidget QLineEdit {{
-                background-color: {ModernStyle.SURFACE};
-                border: 2px solid {ModernStyle.BORDER};
-                border-radius: 6px;
-                padding: 6px 10px;
-                min-height: 36px;
-                color: {ModernStyle.TEXT_PRIMARY};
-            }}
-
-            QTableWidget QSpinBox {{
-                background-color: {ModernStyle.SURFACE};
-                border: 2px solid {ModernStyle.BORDER};
-                border-radius: 6px;
-                padding: 6px 30px 6px 10px; /* reserve space for arrows */
-                min-height: 36px;
-                color: {ModernStyle.TEXT_PRIMARY};
-            }}
-
-            QTableWidget QSpinBox::up-button, QTableWidget QSpinBox::down-button {{
-                subcontrol-origin: border;
-                width: 22px;
-                border-left: 1px solid {ModernStyle.BORDER};
-                background-color: {ModernStyle.SURFACE_VARIANT};
-            }}
-            QTableWidget QSpinBox::up-button {{
-                subcontrol-position: top right;
-                border-top-right-radius: 6px;
-            }}
-            QTableWidget QSpinBox::down-button {{
-                subcontrol-position: bottom right;
-                border-bottom-right-radius: 6px;
-            }}
-            QTableWidget QSpinBox::up-button:hover, QTableWidget QSpinBox::down-button:hover {{
-                background-color: {ModernStyle.BORDER};
-            }}
-
-            QTableWidget QPushButton {{
-                background-color: {ModernStyle.PRIMARY};
-                color: {ModernStyle.TEXT_PRIMARY};
-                border: 1px solid {ModernStyle.PRIMARY_VARIANT};
-                border-bottom: 3px solid {ModernStyle.PRIMARY_VARIANT};
-                padding: 6px 12px;
-                border-radius: 6px;
-                min-height: 36px;
-                min-width: 0px;
-                font-weight: 600;
-                text-align: left;
-            }}
-
-            QTableWidget QPushButton:hover {{
-                background-color: {ModernStyle.PRIMARY_VARIANT};
-            }}
-
-            QTableWidget QPushButton:pressed {{
-                background-color: {ModernStyle.PRIMARY_VARIANT};
-                border-bottom: 1px solid {ModernStyle.PRIMARY_VARIANT};
-                padding-top: 7px;
-                padding-bottom: 5px;
-            }}
-
-            QTableWidget QCheckBox {{
-                padding: 0px;
-                margin: 0px;
-                background: transparent;
-            }}
-            """
-        )
-        items_layout.addWidget(self.auto_item_table)
-
-        items_btn_row = QHBoxLayout()
-        add_item_btn = QPushButton("Add Item")
-        add_item_btn.clicked.connect(self._auto_item_add_item)
-        remove_item_btn = QPushButton("Remove Selected")
-        remove_item_btn.clicked.connect(self._auto_item_remove_selected_items)
-        up_btn = QPushButton("Move Up")
-        up_btn.clicked.connect(lambda: self._auto_item_move_selected(-1))
-        down_btn = QPushButton("Move Down")
-        down_btn.clicked.connect(lambda: self._auto_item_move_selected(1))
-        items_btn_row.addWidget(add_item_btn)
-        items_btn_row.addWidget(remove_item_btn)
-        items_btn_row.addWidget(up_btn)
-        items_btn_row.addWidget(down_btn)
-        items_btn_row.addStretch()
-        items_layout.addLayout(items_btn_row)
-
-        layout.addWidget(items_group)
-
-        users_group = QGroupBox("Users")
-        users_layout = QVBoxLayout(users_group)
-
-        users_btn_row = QHBoxLayout()
-        sel_all_btn = QPushButton("Select All")
-        sel_all_btn.clicked.connect(lambda: self._auto_item_set_all_users(True))
-        sel_none_btn = QPushButton("Select None")
-        sel_none_btn.clicked.connect(lambda: self._auto_item_set_all_users(False))
-        users_btn_row.addWidget(sel_all_btn)
-        users_btn_row.addWidget(sel_none_btn)
-        users_btn_row.addStretch()
-        users_layout.addLayout(users_btn_row)
-
-        self.auto_item_users_container = QWidget()
-        self.auto_item_users_vbox = QVBoxLayout(self.auto_item_users_container)
-        self.auto_item_users_vbox.setContentsMargins(0, 0, 0, 0)
-        self.auto_item_users_vbox.setSpacing(4)
-        self.auto_item_user_checks = {}
-
-        users_scroll = QScrollArea()
-        users_scroll.setWidgetResizable(True)
-        users_scroll.setWidget(self.auto_item_users_container)
-        users_scroll.setMinimumHeight(180)
-        users_layout.addWidget(users_scroll)
-
-        layout.addWidget(users_group)
-
-        log_group = QGroupBox("Auto-Item Log")
-        log_layout = QVBoxLayout(log_group)
-        self.autoitem_status_box = QTextEdit()
-        self.autoitem_status_box.setReadOnly(True)
-        self.autoitem_status_box.setFont(QFont("Consolas", 10))
-        try:
-            self.autoitem_status_box.document().setMaximumBlockCount(5000)
-        except Exception:
-            pass
-        log_layout.addWidget(self.autoitem_status_box)
-        layout.addWidget(log_group)
-
-        footer = QHBoxLayout()
-        footer.addStretch()
-        reset_btn = QPushButton("Restore Auto-Item Defaults")
-        reset_btn.clicked.connect(self._reset_auto_item_to_defaults)
-        footer.addWidget(reset_btn)
-        layout.addLayout(footer)
-
-        layout.addStretch()
-
-        # Debounced persistence (avoid writing settings.json every keystroke)
-        self._auto_item_save_timer = QTimer(self)
-        self._auto_item_save_timer.setSingleShot(True)
-        self._auto_item_save_timer.timeout.connect(self._save_auto_item_settings)
-
-        # Wire change events
-        self.auto_item_enable_chk.toggled.connect(self._on_auto_item_enabled_toggled)
-        self.auto_item_tick_spin.valueChanged.connect(self._on_auto_item_ui_changed)
-        self.auto_item_delay_spin.valueChanged.connect(self._on_auto_item_ui_changed)
-        self.auto_item_disable_mouse_chk.toggled.connect(self._on_auto_item_mouse_toggle_changed)
-        self.auto_item_hotkey_edit.keySequenceChanged.connect(self._on_auto_item_hotkey_changed)
-        self.auto_item_cond_enable_chk.toggled.connect(self._on_auto_item_ui_changed)
-        self.auto_item_cond_color_le.textChanged.connect(self._on_auto_item_ui_changed)
-        self.auto_item_cond_tol_spin.valueChanged.connect(self._on_auto_item_ui_changed)
-
-        # Load persisted config + populate user list and table
-        self._auto_item_refresh_users()
-        self._load_auto_item_settings()
-
-        # Ensure engine exists (but it will idle until enabled + fully configured)
-        self._ensure_auto_item_engine()
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(auto_widget)
-        self.tab_widget.addTab(scroll, "Auto Item")
-
     def _on_autoitem_status(self, message: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
@@ -15398,6 +10998,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 created_ts = 0.0
             if created_ts <= 0.0:
                 try:
+                    import psutil
                     created_ts = float(psutil.Process(int(pid)).create_time())
                 except Exception:
                     created_ts = 0.0
@@ -15550,6 +11151,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             server_label_provider=_server_label_provider,
             ps_link_provider=_ps_link_provider,
             discord_ping_provider=_discord_ping_provider,
+            account_webhooks_provider=self._account_webhook_urls,
             log=self.autoitem_log_signal.emit,
             mouse_block_notify=self.autoitem_mouse_block_signal.emit,
             pause_antiafk=self._auto_item_pause_antiafk,
@@ -16096,60 +11698,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self._apply_auto_item_hotkey(seq, quiet=False)
         self._on_auto_item_ui_changed()
 
-    def _auto_item_refresh_users(self):
-        try:
-            users = self.config_manager.load_users() or {}
-        except Exception:
-            users = {}
-
-        # Preserve the current in-UI selection, including an intentionally empty
-        # blacklist. Only consult disk before this panel has been populated once.
-        selected = [uid for uid, cb in (getattr(self, "auto_item_user_checks", {}) or {}).items() if cb.isChecked()]
-        if not bool(getattr(self, "_auto_item_user_list_initialized", False)):
-            try:
-                selected = list(self._get_auto_item_cfg_from_disk().get("users", []) or [])
-            except Exception:
-                selected = []
-
-        # Clear existing
-        try:
-            while self.auto_item_users_vbox.count():
-                item = self.auto_item_users_vbox.takeAt(0)
-                w = item.widget()
-                if w:
-                    w.setParent(None)
-        except Exception:
-            pass
-
-        self.auto_item_user_checks = {}
-        for uid in sorted(users.keys(), key=lambda u: (users.get(u, {}) or {}).get("username", str(u))):
-            info = users.get(uid, {}) or {}
-            uname = info.get("username", uid)
-            cb = QCheckBox(f"{uname} ({uid})")
-            cb.setProperty("user_id", str(uid))
-            cb.setProperty("search_text", f"{uname} {uid}".lower())
-            cb.toggled.connect(self._on_auto_item_user_selection_changed)
-            self.auto_item_users_vbox.addWidget(cb)
-            self.auto_item_user_checks[str(uid)] = cb
-
-        self.auto_item_users_vbox.addStretch()
-        self._auto_item_user_list_initialized = True
-
-        # Apply selection without triggering persistence churn
-        prev = bool(getattr(self, "_loading_autoitem_settings", False))
-        self._loading_autoitem_settings = True
-        try:
-            self._apply_auto_item_users_to_ui(selected)
-        finally:
-            self._loading_autoitem_settings = prev
-
-        self._auto_item_filter_users()
-        self._auto_item_update_users_hint()
-        try:
-            self._auto_item_last_users_mtime = float(self.config_manager.get_users_mtime())
-        except Exception:
-            self._auto_item_last_users_mtime = None
-
     def _auto_item_refresh_users_if_changed(self) -> None:
         try:
             current_mtime = float(self.config_manager.get_users_mtime())
@@ -16239,25 +11787,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self._auto_item_update_users_hint()
         self._on_auto_item_ui_changed()
 
-    def _auto_item_add_item(self):
-        items = self._current_auto_item_items()
-        items.append(
-            {
-                "id": f"row_{uuid.uuid4().hex}",
-                "enabled": True,
-                "name": "",
-                "amount": 1,
-                "cooldown": 0,
-                "biomes": [],
-                "alert_enabled": False,
-                "alert_webhook": "",
-                "alert_message": "",
-                "alert_lead_s": 15.0,
-            }
-        )
-        self._load_auto_item_items_table(items)
-        self._on_auto_item_ui_changed()
-
     def _auto_item_remove_selected_items(self):
         rows = sorted({idx.row() for idx in self.auto_item_table.selectedIndexes()}, reverse=True)
         if not rows:
@@ -16284,75 +11813,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         except Exception:
             pass
         self._on_auto_item_ui_changed()
-
-    def _auto_item_test_once(self):
-        self._ensure_auto_item_engine()
-        if not getattr(self, "auto_item_engine", None):
-            QMessageBox.warning(self, "Auto-Item", "Auto-Item engine is not available.")
-            return
-
-        if not self._is_manager_running():
-            QMessageBox.information(self, "Auto-Item Test", "Start the manager first so a user window can be resolved.")
-            return
-
-        uid = None
-        mode_combo = getattr(self, "auto_item_user_filter_mode_combo", None)
-        main_filter_mode = _normalize_user_filter_mode(
-            mode_combo.currentData() if isinstance(mode_combo, QComboBox) else "whitelist"
-        )
-        for k, cb in (getattr(self, "auto_item_user_checks", {}) or {}).items():
-            try:
-                is_target = not cb.isChecked() if main_filter_mode == "blacklist" else cb.isChecked()
-                if is_target:
-                    uid = str(k)
-                    break
-            except Exception:
-                continue
-
-        if not uid:
-            QMessageBox.information(self, "Auto-Item Test", "No users are targeted by the main Users filter.")
-            return
-
-        uname = uid
-        try:
-            users = self.config_manager.load_users() or {}
-            info = users.get(uid, {}) or {}
-            uname = info.get("username") or uid
-        except Exception:
-            uname = uid
-
-        confirm = QMessageBox.question(
-            self,
-            "Auto-Item Test",
-            f"Run Auto-Item once on:\n{uname} ({uid})\n\nThis will interact with Roblox and may use items.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
-
-        # Ensure the engine uses the latest UI config (without waiting for debounce).
-        try:
-            self.auto_item_engine.update_config(self._get_auto_item_settings_from_ui())
-        except Exception:
-            pass
-
-        try:
-            ok = bool(self.auto_item_engine.test_once(uid))
-        except Exception as e:
-            self.autoitem_log_signal.emit(f"[Auto-Item] Test: error: {e}")
-            ok = False
-
-        if ok:
-            QMessageBox.information(self, "Auto-Item Test", "Test run complete. Check the Auto-Item log for details.")
-        else:
-            QMessageBox.warning(self, "Auto-Item Test", "Test run did not complete. Check the Auto-Item log for details.")
-
-    def _update_biomes_btn_text(self, btn: QPushButton):
-        biomes = btn.property("biomes") or []
-        biomes = [str(b).strip().upper() for b in (biomes or []) if str(b).strip()]
-        btn.setProperty("biomes", biomes)
-        label = "Any" if not biomes else f"{len(biomes)} selected"
-        btn.setText(f"{label} v")
 
     def _update_users_btn_text(self, btn: QPushButton):
         raw = btn.property("users")
@@ -16460,69 +11920,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             btn.setText("Alert on")
             btn.setToolTip(f"Webhook alert will be sent {lead_s:.1f}s before the action row runs.")
 
-    def _edit_item_biomes(self, btn: QPushButton):
-        try:
-            current = btn.property("biomes") or []
-            current = [str(b).strip().upper() for b in (current or []) if str(b).strip()]
-        except Exception:
-            current = []
-
-        # Dialog
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Select Allowed Biomes")
-        v = QVBoxLayout(dlg)
-
-        btn_row = QHBoxLayout()
-        sel_all_btn = QPushButton("Select All")
-        sel_none_btn = QPushButton("Select None")
-        sel_all_btn.setStyleSheet(self._get_secondary_button_style())
-        sel_none_btn.setStyleSheet(self._get_secondary_button_style())
-        btn_row.addWidget(sel_all_btn)
-        btn_row.addWidget(sel_none_btn)
-        btn_row.addStretch()
-        v.addLayout(btn_row)
-
-        lst = QListWidget()
-        lst.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        lst.setMinimumHeight(340)
-        # Make selected highlight consistent regardless of focus (Select All button vs manual clicks)
-        lst.setStyleSheet(
-            """
-            QListWidget::item:selected {
-                background-color: palette(highlight);
-                color: palette(highlighted-text);
-            }
-            QListWidget::item:selected:!active {
-                background-color: palette(highlight);
-                color: palette(highlighted-text);
-            }
-            """
-        )
-        try:
-            all_biomes = list(biome_names())
-        except Exception:
-            all_biomes = []
-        sel = set(current)
-        for b in all_biomes:
-            it = QListWidgetItem(str(b).upper())
-            lst.addItem(it)
-            if it.text() in sel:
-                it.setSelected(True)
-
-        sel_all_btn.clicked.connect(lambda: (lst.selectAll(), lst.setFocus()))
-        sel_none_btn.clicked.connect(lambda: (lst.clearSelection(), lst.setFocus()))
-        v.addWidget(lst)
-        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
-        v.addWidget(bb)
-
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            chosen = [i.text() for i in lst.selectedItems()]
-            btn.setProperty("biomes", chosen)
-            self._update_biomes_btn_text(btn)
-            self._on_auto_item_ui_changed()
-
     def _edit_item_users(self, btn: QPushButton):
         try:
             raw_current = btn.property("users")
@@ -16594,19 +11991,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         lst = QListWidget()
         lst.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        # Make selected highlight consistent regardless of focus (Select All button vs manual clicks)
-        lst.setStyleSheet(
-            """
-            QListWidget::item:selected {
-                background-color: palette(highlight);
-                color: palette(highlighted-text);
-            }
-            QListWidget::item:selected:!active {
-                background-color: palette(highlight);
-                color: palette(highlighted-text);
-            }
-            """
-        )
 
         if mode == "blacklist":
             sel = set(current or [])
@@ -16815,598 +12199,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             self._update_alert_btn_text(btn)
             self._on_auto_item_ui_changed()
 
-    def _load_auto_item_items_table(self, items: List[dict]):
-        self.auto_item_table.setRowCount(0)
-
-        def _wrap_cell(w: QWidget, *, center: bool = False, margins: Tuple[int, int, int, int] = (0, 6, 0, 6)) -> QWidget:
-            holder = QWidget()
-            holder.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-            holder.setStyleSheet("background: transparent;")
-            lay = QHBoxLayout(holder)
-            lay.setContentsMargins(*margins)
-            lay.setSpacing(0)
-            if center:
-                lay.addStretch(1)
-                lay.addWidget(w, 0, Qt.AlignmentFlag.AlignCenter)
-                lay.addStretch(1)
-            else:
-                lay.addWidget(w, 1, Qt.AlignmentFlag.AlignVCenter)
-            try:
-                w.raise_()
-            except Exception:
-                pass
-            try:
-                holder.raise_()
-            except Exception:
-                pass
-            return holder
-
-        for it in (items or []):
-            row = self.auto_item_table.rowCount()
-            self.auto_item_table.insertRow(row)
-            try:
-                self.auto_item_table.setRowHeight(row, 62)
-            except Exception:
-                pass
-
-            en = QCheckBox()
-            en.setChecked(bool(it.get("enabled", True)))
-            en.setStyleSheet("background: transparent;")
-            en.toggled.connect(self._on_auto_item_ui_changed)
-            self.auto_item_table.setCellWidget(row, 0, _wrap_cell(en, center=True))
-
-            name = QLineEdit(str(it.get("name", "") or ""))
-            name.setPlaceholderText("Item name")
-            name.textChanged.connect(self._on_auto_item_ui_changed)
-            name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            self.auto_item_table.setCellWidget(row, 1, _wrap_cell(name, center=False, margins=(6, 6, 6, 6)))
-
-            amt = _AutoItemSpinBox()
-            amt.setRange(1, 999)
-            amt.setValue(max(1, int(it.get("amount", 1) or 1)))
-            amt.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            try:
-                amt.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
-            except Exception:
-                pass
-            amt.setMinimumWidth(80)
-            amt.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-            amt.valueChanged.connect(self._on_auto_item_ui_changed)
-            self.auto_item_table.setCellWidget(row, 2, _wrap_cell(amt, center=True, margins=(0, 6, 0, 6)))
-
-            cd = _AutoItemSpinBox()
-            cd.setRange(0, 86400)
-            cd.setValue(max(0, int(it.get("cooldown", 0) or 0)))
-            cd.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            try:
-                cd.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
-            except Exception:
-                pass
-            cd.setMinimumWidth(95)
-            cd.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-            cd.valueChanged.connect(self._on_auto_item_ui_changed)
-            self.auto_item_table.setCellWidget(row, 3, _wrap_cell(cd, center=True, margins=(0, 6, 0, 6)))
-
-            bbtn = QPushButton()
-            bbtn.setProperty("biomes", it.get("biomes", []) or [])
-            self._update_biomes_btn_text(bbtn)
-            try:
-                bbtn.setCursor(Qt.CursorShape.PointingHandCursor)
-            except Exception:
-                pass
-            bbtn.clicked.connect(lambda _, b=bbtn: self._edit_item_biomes(b))
-            bbtn.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
-            self.auto_item_table.setCellWidget(row, 4, _wrap_cell(bbtn, center=False, margins=(6, 6, 6, 6)))
-
-            ubtn = QPushButton()
-            raw_users = it.get("users", None)
-            users_explicit = bool(it.get("users_explicit", False))
-            users_prop = None
-            if raw_users is None:
-                users_prop = None
-            elif isinstance(raw_users, (list, tuple, set)):
-                users_list = [str(u).strip() for u in raw_users if str(u).strip()]
-                if not users_list:
-                    users_prop = [] if users_explicit else None
-                else:
-                    users_prop = users_list
-            ubtn.setProperty("users", users_prop)
-            self._update_users_btn_text(ubtn)
-            try:
-                ubtn.setCursor(Qt.CursorShape.PointingHandCursor)
-            except Exception:
-                pass
-            ubtn.clicked.connect(lambda _, b=ubtn: self._edit_item_users(b))
-            ubtn.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
-            self.auto_item_table.setCellWidget(row, 5, _wrap_cell(ubtn, center=False, margins=(6, 6, 6, 6)))
-
-            abtn = QPushButton()
-            abtn.setProperty("alert_enabled", bool(it.get("alert_enabled", False)))
-            abtn.setProperty(
-                "alert_webhook",
-                str(it.get("alert_webhook") or it.get("alert_webhook_url") or "").strip(),
-            )
-            abtn.setProperty("alert_message", str(it.get("alert_message") or ""))
-            try:
-                abtn.setProperty("alert_lead_s", float(it.get("alert_lead_s", 15.0) or 15.0))
-            except Exception:
-                abtn.setProperty("alert_lead_s", 15.0)
-            self._update_alert_btn_text(abtn)
-            try:
-                abtn.setCursor(Qt.CursorShape.PointingHandCursor)
-            except Exception:
-                pass
-            abtn.clicked.connect(lambda _, b=abtn: self._edit_item_alert(b))
-            abtn.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
-            self.auto_item_table.setCellWidget(row, 6, _wrap_cell(abtn, center=False, margins=(6, 6, 6, 6)))
-
-    def _current_auto_item_items(self) -> List[dict]:
-        items: List[dict] = []
-        rows = self.auto_item_table.rowCount()
-
-        def _unwrap(col_widget: QWidget, typ):
-            if col_widget is None:
-                return None
-            if isinstance(col_widget, typ):
-                return col_widget
-            try:
-                return col_widget.findChild(typ)
-            except Exception:
-                return None
-
-        for r in range(rows):
-            try:
-                en = _unwrap(self.auto_item_table.cellWidget(r, 0), QCheckBox)
-                name = _unwrap(self.auto_item_table.cellWidget(r, 1), QLineEdit)
-                amt = _unwrap(self.auto_item_table.cellWidget(r, 2), QSpinBox)
-                cd = _unwrap(self.auto_item_table.cellWidget(r, 3), QSpinBox)
-                bbtn = _unwrap(self.auto_item_table.cellWidget(r, 4), QPushButton)
-                ubtn = _unwrap(self.auto_item_table.cellWidget(r, 5), QPushButton)
-                abtn = _unwrap(self.auto_item_table.cellWidget(r, 6), QPushButton)
-
-                item = {
-                    "enabled": bool(en.isChecked()) if isinstance(en, QCheckBox) else True,
-                    "name": name.text().strip() if isinstance(name, QLineEdit) else "",
-                    "amount": int(amt.value()) if isinstance(amt, QSpinBox) else 1,
-                    "cooldown": int(cd.value()) if isinstance(cd, QSpinBox) else 0,
-                    "biomes": (bbtn.property("biomes") or []) if isinstance(bbtn, QPushButton) else [],
-                }
-                if isinstance(ubtn, QPushButton):
-                    raw_users = ubtn.property("users")
-                    users_seq = None
-                    if raw_users is None:
-                        users_seq = None
-                    elif isinstance(raw_users, (list, tuple, set)):
-                        users_seq = raw_users
-                    else:
-                        try:
-                            if isinstance(raw_users, (str, dict)):
-                                users_seq = None
-                            else:
-                                users_seq = list(raw_users)  # type: ignore[arg-type]
-                        except Exception:
-                            users_seq = None
-
-                    if users_seq is not None:
-                        users_list = [str(u).strip() for u in (users_seq or []) if str(u).strip()]
-                        item["users"] = users_list
-                        item["users_explicit"] = True
-
-                if isinstance(abtn, QPushButton):
-                    try:
-                        item["alert_enabled"] = bool(abtn.property("alert_enabled"))
-                    except Exception:
-                        item["alert_enabled"] = False
-                    try:
-                        item["alert_webhook"] = str(abtn.property("alert_webhook") or "").strip()
-                    except Exception:
-                        item["alert_webhook"] = ""
-                    try:
-                        item["alert_message"] = str(abtn.property("alert_message") or "")
-                    except Exception:
-                        item["alert_message"] = ""
-                    try:
-                        item["alert_lead_s"] = float(abtn.property("alert_lead_s") or 15.0)
-                    except Exception:
-                        item["alert_lead_s"] = 15.0
-                items.append(item)
-            except Exception:
-                continue
-        return items
-
-    def _auto_item_capture_coord(self, key: str, sample_color: bool = False):
-        """
-        Capture a coordinate by screenshotting a Roblox window and letting the user click the point.
-        """
-        try:
-            import ctypes
-            import psutil
-            import win32api as _wapi
-            import win32con as _wcon
-            import win32gui as _wgui
-            import win32process as _wproc
-        except Exception as e:
-            self.autoitem_log_signal.emit(f"[Auto-Item] Missing dependencies for capture: {e}")
-            return
-
-        def _is_roblox_hwnd(hwnd: int) -> bool:
-            try:
-                if not hwnd or not _wgui.IsWindow(hwnd):
-                    return False
-                _, pid = _wproc.GetWindowThreadProcessId(hwnd)
-                if not pid:
-                    return False
-                return str(psutil.Process(int(pid)).name()).lower() == "robloxplayerbeta.exe"
-            except Exception:
-                return False
-
-        def _pick_hwnd() -> Optional[int]:
-            try:
-                fg = _wgui.GetForegroundWindow()
-                if _is_roblox_hwnd(fg):
-                    return int(fg)
-            except Exception:
-                pass
-            try:
-                wins = enum_roblox_windows()
-                if wins:
-                    return int(wins[0].hwnd)
-            except Exception:
-                pass
-            return None
-
-        def _bring_foreground(hwnd: int) -> None:
-            try:
-                if _wgui.IsIconic(hwnd):
-                    _wgui.ShowWindow(hwnd, _wcon.SW_RESTORE)
-                try:
-                    cur_tid = _wapi.GetCurrentThreadId()
-                    win_tid = _wproc.GetWindowThreadProcessId(hwnd)[0]
-                    ctypes.windll.user32.AttachThreadInput(cur_tid, win_tid, True)
-                    _wgui.BringWindowToTop(hwnd)
-                    _wgui.SetForegroundWindow(hwnd)
-                finally:
-                    try:
-                        ctypes.windll.user32.AttachThreadInput(cur_tid, win_tid, False)
-                    except Exception:
-                        pass
-            except Exception:
-                try:
-                    _wgui.SetForegroundWindow(hwnd)
-                except Exception:
-                    pass
-
-        try:
-            hwnd = _pick_hwnd()
-            if not hwnd:
-                self.autoitem_log_signal.emit("[Auto-Item] No Roblox window found to capture from.")
-                return
-
-            _bring_foreground(hwnd)
-            time.sleep(0.12)
-
-            # Capture client area only (so ratios match the engine's client-relative math)
-            _l, _t, cr, cb = _wgui.GetClientRect(hwnd)
-            client_w = int(cr - _l)
-            client_h = int(cb - _t)
-            if client_w <= 0 or client_h <= 0:
-                raise RuntimeError("Invalid Roblox client size.")
-
-            full = capture_window_image(hwnd)
-            if full is None:
-                raise RuntimeError("Failed to capture Roblox window.")
-
-            def _is_blackish(im: Image.Image) -> bool:
-                try:
-                    _lo, _hi = im.convert("L").getextrema()
-                    return int(_hi) <= 5
-                except Exception:
-                    return False
-
-            # If the primary capture is black (PrintWindow can "succeed" but return black),
-            # try a direct screen grab as a fallback.
-            if _is_blackish(full):
-                try:
-                    from PIL import ImageGrab as _ig
-
-                    wl, wt, wr, wb = _wgui.GetWindowRect(hwnd)
-                    alt = _ig.grab(bbox=(wl, wt, wr, wb))
-                    if alt is not None and not _is_blackish(alt):
-                        full = alt
-                except Exception:
-                    pass
-
-            # If still black, try alternate PrintWindow flags (some windows only render with certain flags).
-            if _is_blackish(full):
-                try:
-                    import win32ui as _wui
-                    from ctypes import windll as _windll
-
-                    def _try_printwindow(flag: int) -> Optional[Image.Image]:
-                        try:
-                            left, top, right, bottom = _wgui.GetWindowRect(hwnd)
-                            width = int(right - left)
-                            height = int(bottom - top)
-                            if width <= 0 or height <= 0:
-                                return None
-
-                            hwnd_dc = _wgui.GetWindowDC(hwnd)
-                            if not hwnd_dc:
-                                return None
-                            try:
-                                mfc_dc = _wui.CreateDCFromHandle(hwnd_dc)
-                                save_dc = mfc_dc.CreateCompatibleDC()
-                                bmp = _wui.CreateBitmap()
-                                bmp.CreateCompatibleBitmap(mfc_dc, width, height)
-                                save_dc.SelectObject(bmp)
-
-                                ok = _windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), int(flag))
-                                if int(ok) != 1:
-                                    try:
-                                        _wgui.DeleteObject(bmp.GetHandle())
-                                    except Exception:
-                                        pass
-                                    try:
-                                        save_dc.DeleteDC()
-                                    except Exception:
-                                        pass
-                                    try:
-                                        mfc_dc.DeleteDC()
-                                    except Exception:
-                                        pass
-                                    return None
-
-                                bmpinfo = bmp.GetInfo()
-                                bmpstr = bmp.GetBitmapBits(True)
-                                img2 = Image.frombuffer(
-                                    "RGB",
-                                    (bmpinfo["bmWidth"], bmpinfo["bmHeight"]),
-                                    bmpstr,
-                                    "raw",
-                                    "BGRX",
-                                    0,
-                                    1,
-                                )
-                                try:
-                                    _wgui.DeleteObject(bmp.GetHandle())
-                                except Exception:
-                                    pass
-                                try:
-                                    save_dc.DeleteDC()
-                                except Exception:
-                                    pass
-                                try:
-                                    mfc_dc.DeleteDC()
-                                except Exception:
-                                    pass
-                                return img2
-                            finally:
-                                try:
-                                    _wgui.ReleaseDC(hwnd, hwnd_dc)
-                                except Exception:
-                                    pass
-                        except Exception:
-                            return None
-
-                    for fl in (0x00000000, 0x00000001, 0x00000003):
-                        alt2 = _try_printwindow(fl)
-                        if alt2 is not None and not _is_blackish(alt2):
-                            full = alt2
-                            break
-                except Exception:
-                    pass
-
-            # Compute client crop rect in the captured image coordinate space.
-            wl, wt, wr, wb = _wgui.GetWindowRect(hwnd)
-            win_w = max(1, int(wr - wl))
-            win_h = max(1, int(wb - wt))
-            scale_x = float(full.width) / float(win_w) if win_w else 1.0
-            scale_y = float(full.height) / float(win_h) if win_h else 1.0
-
-            client_left, client_top = _wgui.ClientToScreen(hwnd, (0, 0))
-            crop_left = int((client_left - wl) * scale_x)
-            crop_top = int((client_top - wt) * scale_y)
-            crop_right = int(crop_left + (client_w * scale_x))
-            crop_bottom = int(crop_top + (client_h * scale_y))
-
-            crop_left = max(0, min(full.width - 1, crop_left))
-            crop_top = max(0, min(full.height - 1, crop_top))
-            crop_right = max(crop_left + 1, min(full.width, crop_right))
-            crop_bottom = max(crop_top + 1, min(full.height, crop_bottom))
-
-            client_crop_w = max(1, crop_right - crop_left)
-            client_crop_h = max(1, crop_bottom - crop_top)
-
-            client_img = full.crop((crop_left, crop_top, crop_right, crop_bottom))
-
-            # Prefer showing the client crop; if it's black but the full window isn't, show full
-            # and convert clicks back into client-relative coordinates.
-            show_img = client_img
-            offset_x = 0
-            offset_y = 0
-            if _is_blackish(client_img) and not _is_blackish(full):
-                show_img = full
-                offset_x = crop_left
-                offset_y = crop_top
-
-            # If the screenshot is still black, give a clearer hint (common with fullscreen / protected surfaces)
-            if _is_blackish(show_img):
-                # Final fallback: try Qt's grabWindow which can behave differently than PIL/PrintWindow.
-                try:
-                    screen = QApplication.primaryScreen()
-                    pm_full = screen.grabWindow(hwnd) if screen else QPixmap()
-
-                    def _pm_blackish(pm: QPixmap) -> bool:
-                        try:
-                            if pm.isNull():
-                                return True
-                            qimg = pm.toImage()
-                            w = qimg.width()
-                            h = qimg.height()
-                            if w <= 0 or h <= 0:
-                                return True
-                            pts = [
-                                (w // 2, h // 2),
-                                (w // 4, h // 4),
-                                (3 * w // 4, h // 4),
-                                (w // 4, 3 * h // 4),
-                                (3 * w // 4, 3 * h // 4),
-                            ]
-                            mx = 0
-                            for x, y in pts:
-                                c = qimg.pixelColor(int(x), int(y))
-                                mx = max(mx, int(c.red()), int(c.green()), int(c.blue()))
-                            return mx <= 5
-                        except Exception:
-                            return True
-
-                    if not _pm_blackish(pm_full):
-                        # Crop client area from the Qt pixmap using the same scale approach.
-                        sx = float(pm_full.width()) / float(win_w) if win_w else 1.0
-                        sy = float(pm_full.height()) / float(win_h) if win_h else 1.0
-                        q_crop_left = int((client_left - wl) * sx)
-                        q_crop_top = int((client_top - wt) * sy)
-                        q_crop_right = int(q_crop_left + (client_w * sx))
-                        q_crop_bottom = int(q_crop_top + (client_h * sy))
-                        q_crop_left = max(0, min(pm_full.width() - 1, q_crop_left))
-                        q_crop_top = max(0, min(pm_full.height() - 1, q_crop_top))
-                        q_crop_right = max(q_crop_left + 1, min(pm_full.width(), q_crop_right))
-                        q_crop_bottom = max(q_crop_top + 1, min(pm_full.height(), q_crop_bottom))
-
-                        pm_client = pm_full.copy(QRect(q_crop_left, q_crop_top, q_crop_right - q_crop_left, q_crop_bottom - q_crop_top))
-                        pm_show = pm_client if not _pm_blackish(pm_client) else pm_full
-
-                        # Convert to PIL for reuse of the existing click->relative math + color sampling.
-                        try:
-                            qimg = pm_show.toImage().convertToFormat(QImage.Format.Format_RGB888)
-                            ptr = qimg.bits()
-                            ptr.setsize(qimg.width() * qimg.height() * 3)
-                            show_img = Image.frombytes("RGB", (qimg.width(), qimg.height()), bytes(ptr))
-
-                            if pm_show.cacheKey() == pm_full.cacheKey():
-                                offset_x = q_crop_left
-                                offset_y = q_crop_top
-                                client_crop_w = max(1, q_crop_right - q_crop_left)
-                                client_crop_h = max(1, q_crop_bottom - q_crop_top)
-                            else:
-                                offset_x = 0
-                                offset_y = 0
-                                client_crop_w = max(1, pm_show.width())
-                                client_crop_h = max(1, pm_show.height())
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-            if _is_blackish(show_img):
-                self.autoitem_log_signal.emit(
-                    "[Auto-Item] Screenshot is still black. Roblox may be blocking capture (common in exclusive fullscreen / MS Store builds). "
-                    "Try windowed/borderless and re-capture."
-                )
-                resp = QMessageBox.question(
-                    self,
-                    "Capture Failed",
-                    "Roblox screenshot capture returned a black image.\n\n"
-                    "Try:\n"
-                    "- Windowed/borderless mode (avoid exclusive fullscreen)\n"
-                    "- Ensure the window is not minimized\n"
-                    "- Try running M.J.JARAM as Administrator\n\n"
-                    "Use hover-based capture instead?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                if resp == QMessageBox.StandardButton.Yes:
-                    self.autoitem_log_signal.emit(f"[Auto-Item] Hover capture for '{key}' in 3 seconds...")
-
-                    def _hover_capture():
-                        try:
-                            cx, cy = _wapi.GetCursorPos()
-                            ox, oy = _wgui.ClientToScreen(hwnd, (0, 0))
-                            _cl, _ct, _cr, _cb = _wgui.GetClientRect(hwnd)
-                            ww = int(_cr - _cl)
-                            hh = int(_cb - _ct)
-                            if ww <= 0 or hh <= 0:
-                                raise RuntimeError("Invalid Roblox client size.")
-
-                            rx2 = max(0.0, min(1.0, (cx - ox) / float(ww)))
-                            ry2 = max(0.0, min(1.0, (cy - oy) / float(hh)))
-
-                            if key == "conditional_point":
-                                self._auto_item_coords["conditional_point"] = {"x": rx2, "y": ry2}
-                                self.auto_item_cond_point_le.setText(f"{rx2:.4f}, {ry2:.4f}")
-                                if sample_color:
-                                    try:
-                                        from PIL import ImageGrab as _ig2
-
-                                        px_img = _ig2.grab(bbox=(int(cx), int(cy), int(cx) + 1, int(cy) + 1))
-                                        r, g, b = tuple(px_img.getpixel((0, 0))[:3])
-                                        self.auto_item_cond_color_le.setText(f"#{int(r):02X}{int(g):02X}{int(b):02X}")
-                                    except Exception:
-                                        pass
-                            else:
-                                self._auto_item_coords[key] = {"x": rx2, "y": ry2}
-                                le2 = self._auto_item_coord_edits.get(key)
-                                if le2:
-                                    le2.setText(f"{rx2:.4f}, {ry2:.4f}")
-
-                            self.autoitem_log_signal.emit(f"[Auto-Item] Set '{key}' to ({rx2:.4f}, {ry2:.4f}) via hover.")
-                            self._on_auto_item_ui_changed()
-                        except Exception as e:
-                            self.autoitem_log_signal.emit(f"[Auto-Item] Hover capture failed for '{key}': {e}")
-
-                    QTimer.singleShot(3000, _hover_capture)
-                return
-
-            title_map = {
-                "inv_button": "Inventory Button",
-                "items_tab": "Items Tab",
-                "search_box": "Search Box",
-                "query_pos": "Query / Result Click",
-                "amount_box": "Amount Box",
-                "use_button": "Use Button",
-                "close_button": "Close Button",
-                "conditional_point": "Conditional Point",
-            }
-            title = f"Select {title_map.get(key, key)}"
-
-            pm = pil_to_pixmap(show_img)
-            dlg = PointPickDialog(pm, title, parent=self)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
-                return
-
-            picked = dlg.selected_point()
-            if not picked:
-                return
-            _xf, _yf, px, py = picked
-
-            # Convert the click back into client-relative coordinates (0..1)
-            rx = (float(px) - float(offset_x)) / float(client_crop_w)
-            ry = (float(py) - float(offset_y)) / float(client_crop_h)
-            if rx < 0.0 or rx > 1.0 or ry < 0.0 or ry > 1.0:
-                QMessageBox.warning(self, "Invalid Selection", "Please click inside the Roblox client area.")
-                return
-
-            if key == "conditional_point":
-                self._auto_item_coords["conditional_point"] = {"x": float(rx), "y": float(ry)}
-                self.auto_item_cond_point_le.setText(f"{float(rx):.4f}, {float(ry):.4f}")
-
-                if sample_color:
-                    try:
-                        rgb_img = show_img.convert("RGB")
-                        r, g, b = rgb_img.getpixel((int(px), int(py)))[:3]
-                        self.auto_item_cond_color_le.setText(f"#{int(r):02X}{int(g):02X}{int(b):02X}")
-                    except Exception:
-                        pass
-            else:
-                self._auto_item_coords[key] = {"x": float(rx), "y": float(ry)}
-                le = self._auto_item_coord_edits.get(key)
-                if le:
-                    le.setText(f"{float(rx):.4f}, {float(ry):.4f}")
-
-            self.autoitem_log_signal.emit(f"[Auto-Item] Set '{key}' to ({float(rx):.4f}, {float(ry):.4f}).")
-            self._on_auto_item_ui_changed()
-        except Exception as e:
-            self.autoitem_log_signal.emit(f"[Auto-Item] Capture failed for '{key}': {e}")
-
     def _update_auto_item_disable_mouse_tooltip(self) -> None:
         chk = getattr(self, "auto_item_disable_mouse_chk", None)
         if chk is None:
@@ -17438,43 +12230,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         self._on_auto_item_ui_changed()
 
-    def _get_auto_item_settings_from_ui(self) -> dict:
-        # Selected users
-        users = [str(uid).strip() for uid, cb in (self.auto_item_user_checks or {}).items() if cb.isChecked() and str(uid).strip()]
-
-        coords = {}
-        for k in ("inv_button", "items_tab", "search_box", "query_pos", "amount_box", "use_button", "close_button"):
-            if k in (self._auto_item_coords or {}):
-                coords[k] = dict(self._auto_item_coords[k])
-
-        # Conditional click lives under coords.conditional
-        cond_pt = (self._auto_item_coords or {}).get("conditional_point")
-        coords["conditional"] = {
-            "enabled": bool(self.auto_item_cond_enable_chk.isChecked()),
-            "point": dict(cond_pt) if isinstance(cond_pt, dict) else {"x": 0.0, "y": 0.0},
-            "color": self.auto_item_cond_color_le.text().strip() or "#FFFFFF",
-            "tolerance": int(self.auto_item_cond_tol_spin.value()),
-        }
-
-        return {
-            "enabled": bool(self.auto_item_enable_chk.isChecked()),
-            "tick_interval": float(self.auto_item_tick_spin.value()),
-            "click_delay": float(self.auto_item_delay_spin.value()),
-            "disable_mouse_move": bool(getattr(self, "auto_item_disable_mouse_chk", None) and self.auto_item_disable_mouse_chk.isChecked()),
-            "menu_debug": bool(getattr(self, "auto_item_menu_debug_chk", None) and self.auto_item_menu_debug_chk.isChecked()),
-            "toggle_hotkey": (self.auto_item_hotkey_edit.keySequence().toString().strip() if getattr(self, "auto_item_hotkey_edit", None) else ""),
-            "users": users,
-            "coords": coords,
-            "items": self._current_auto_item_items(),
-        }
-
-    def _get_auto_item_cfg_from_disk(self) -> dict:
-        try:
-            settings = self.config_manager.load_settings() or {}
-            return settings.get("auto_item", {}) or {}
-        except Exception:
-            return {}
-
     def _apply_auto_item_users_to_ui(self, users: List[str]):
         selected = {str(u) for u in (users or []) if str(u).strip()}
         for uid, cb in (self.auto_item_user_checks or {}).items():
@@ -17482,71 +12237,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 cb.setChecked(uid in selected)
             except Exception:
                 pass
-
-    def _load_auto_item_settings(self):
-        cfg = self._get_auto_item_cfg_from_disk()
-        defaults = self.config_manager.default_settings.get("auto_item", {}) or {}
-        cfg = {**defaults, **(cfg or {})}
-        hk = str(cfg.get("toggle_hotkey", "Ctrl+Alt+Space") or "Ctrl+Alt+Space").strip()
-
-        self._loading_autoitem_settings = True
-        try:
-            self.auto_item_enable_chk.setChecked(bool(cfg.get("enabled", False)))
-            self.auto_item_tick_spin.setValue(float(cfg.get("tick_interval", 1.0) or 1.0))
-            self.auto_item_delay_spin.setValue(float(cfg.get("click_delay", 0.2) or 0.2))
-            try:
-                self.auto_item_disable_mouse_chk.setChecked(bool(cfg.get("disable_mouse_move", False)))
-            except Exception:
-                self.auto_item_disable_mouse_chk.setChecked(False)
-            self._update_auto_item_disable_mouse_tooltip()
-            try:
-                self.auto_item_hotkey_edit.setKeySequence(QKeySequence(hk))
-            except Exception:
-                pass
-
-            # Coords
-            self._auto_item_coords = {}
-            coords = cfg.get("coords", {}) or {}
-            for k in ("inv_button", "items_tab", "search_box", "query_pos", "amount_box", "use_button", "close_button"):
-                if isinstance(coords.get(k), dict):
-                    self._auto_item_coords[k] = {"x": float(coords[k].get("x", 0.0)), "y": float(coords[k].get("y", 0.0))}
-                    le = self._auto_item_coord_edits.get(k)
-                    if le:
-                        le.setText(f"{self._auto_item_coords[k]['x']:.4f}, {self._auto_item_coords[k]['y']:.4f}")
-                else:
-                    le = self._auto_item_coord_edits.get(k)
-                    if le:
-                        le.clear()
-
-            cond = coords.get("conditional", {}) or {}
-            self.auto_item_cond_enable_chk.setChecked(bool(cond.get("enabled", False)))
-            self.auto_item_cond_color_le.setText(str(cond.get("color", "#FFFFFF") or "#FFFFFF"))
-            self.auto_item_cond_tol_spin.setValue(int(cond.get("tolerance", 10) or 10))
-            pt = cond.get("point") or {}
-            if isinstance(pt, dict):
-                self._auto_item_coords["conditional_point"] = {"x": float(pt.get("x", 0.0)), "y": float(pt.get("y", 0.0))}
-                self.auto_item_cond_point_le.setText(f"{self._auto_item_coords['conditional_point']['x']:.4f}, {self._auto_item_coords['conditional_point']['y']:.4f}")
-            else:
-                self.auto_item_cond_point_le.clear()
-
-            # Items + users
-            self._load_auto_item_items_table(cfg.get("items", []) or [])
-            self._apply_auto_item_users_to_ui(cfg.get("users", []) or [])
-        finally:
-            self._loading_autoitem_settings = False
-
-        # Register hotkey (quiet on load)
-        try:
-            self._apply_auto_item_hotkey(hk, quiet=True)
-        except Exception:
-            pass
-
-        # Push config into engine after load
-        try:
-            if self.auto_item_engine is not None:
-                self.auto_item_engine.update_config(self._get_auto_item_settings_from_ui())
-        except Exception:
-            pass
 
     def _save_auto_item_settings(self):
         if self._loading_autoitem_settings:
@@ -17577,6 +12267,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             pass
 
     def _on_auto_item_ui_changed(self):
+        self._sync_sol_toggles()
         if self._loading_autoitem_settings:
             return
         try:
@@ -17590,45 +12281,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             self._auto_item_save_timer.start(300)
         except Exception:
             self._save_auto_item_settings()
-
-    def _reset_auto_item_to_defaults(self):
-        defaults = self.config_manager.default_settings.get("auto_item", {}) or {}
-        hk = str(defaults.get("toggle_hotkey", "Ctrl+Alt+Space") or "Ctrl+Alt+Space").strip()
-        self._loading_autoitem_settings = True
-        try:
-            self.auto_item_enable_chk.setChecked(bool(defaults.get("enabled", False)))
-            self.auto_item_tick_spin.setValue(float(defaults.get("tick_interval", 1.0) or 1.0))
-            self.auto_item_delay_spin.setValue(float(defaults.get("click_delay", 0.2) or 0.2))
-            try:
-                self.auto_item_disable_mouse_chk.setChecked(bool(defaults.get("disable_mouse_move", False)))
-            except Exception:
-                self.auto_item_disable_mouse_chk.setChecked(False)
-            self._update_auto_item_disable_mouse_tooltip()
-            try:
-                self.auto_item_hotkey_edit.setKeySequence(QKeySequence(hk))
-            except Exception:
-                pass
-            self.auto_item_cond_enable_chk.setChecked(False)
-            self.auto_item_cond_color_le.setText("#FFFFFF")
-            self.auto_item_cond_tol_spin.setValue(10)
-            self.auto_item_cond_point_le.clear()
-            self._auto_item_coords = {}
-            for le in (self._auto_item_coord_edits or {}).values():
-                try:
-                    le.clear()
-                except Exception:
-                    pass
-            self._load_auto_item_items_table([])
-            self._auto_item_set_all_users(False)
-        finally:
-            self._loading_autoitem_settings = False
-
-        try:
-            self._apply_auto_item_hotkey(hk, quiet=True)
-        except Exception:
-            pass
-
-        self._on_auto_item_ui_changed()
 
     def _default_auto_item_behavior(self) -> dict:
         return {
@@ -17978,12 +12630,16 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             if not isinstance(value, dict):
                 return None
             try:
-                return {
+                out = {
                     "x": float(value.get("x", 0.0)),
                     "y": float(value.get("y", 0.0)),
                 }
             except Exception:
                 return None
+            ui_name = str(value.get("ui") or "").strip()
+            if ui_name:
+                out["ui"] = ui_name
+            return out
 
         def _roi_from(value: Any) -> dict:
             source = value if isinstance(value, dict) else {}
@@ -18360,7 +13016,306 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 "actions": self._make_auto_item_preset_actions(legacy_coords),
                 "behavior": self._default_auto_item_behavior(),
             }
-        ]
+        ] + self._sol_item_presets()
+
+    def _on_webhook_rate_limited(self, url: str, wait_s: float, is_global: bool) -> None:
+        """Discord 429'd a webhook: ping the owner in the alert (log) channel, at most every 10 min per channel."""
+        try:
+            settings = self.config_manager.peek_settings() or {}
+        except Exception:
+            return
+        alert_url = self.config_manager._resolve_alert_webhook_url(settings)
+        if not alert_url or alert_url == url:
+            return  # the log channel itself is limited: a notice there would only queue behind it
+        now = time.monotonic()
+        with self._ratelimit_notified_lock:
+            if now - self._ratelimit_notified.get(url, -1e9) < 600.0:
+                return
+            self._ratelimit_notified[url] = now
+
+        alerts = settings.get("alerts") or {}
+        raw = str((alerts.get("ratelimit_ping") if isinstance(alerts, dict) else "") or "").strip()
+        if raw:
+            ping = f"<@{raw}>" if raw.isdigit() else raw
+        else:
+            dc = settings.get("discord_control") or {}
+            admins = dc.get("admin_user_ids") if isinstance(dc, dict) else []
+            ping = " ".join(f"<@{a}>" for a in (admins or []) if str(a).strip().isdigit())
+        info = webhook_gate.channel_info(url)
+        if info.get("channel_id"):
+            where = f"<#{info['channel_id']}>"
+            if info.get("name"):
+                where += f" (webhook `{info['name']}`)"
+        else:
+            m = re.search(r"/webhooks/(\d+)(?:/|$)", url)  # numeric id only: never any of the token
+            where = f"webhook `{info.get('name') or (m.group(1) if m else 'unknown')}`"
+        scope = " (global: every webhook paused)" if is_global else ""
+        msg = (
+            f"{ping} {where} is rate limited by Discord{scope}. "
+            f"Its alerts wait {float(wait_s):.0f}s and are resent automatically "
+            f"(dropped only if still limited after {webhook_gate.MAX_WAIT_S:.0f}s)."
+        ).strip()
+        self.config_manager._dispatch_alert_message(alert_url, msg)
+
+    # Auto SC + BR toggle: owns two Auto Actions rows with fixed ids, built from the SC/BR presets.
+    _SOL_ROW_IDS = {"sol_sc": "row_sol_sc", "sol_br": "row_sol_br"}
+    # _SOL_RESOLUTIONS is set by ui_shell.install (one list, in ui_pages/automate.py).
+
+    def _sync_sol_toggles(self) -> None:
+        if not hasattr(self, "sol_sc_chk") or not hasattr(self, "auto_item_table"):
+            return
+        try:
+            on = {str(it.get("id")) for it in self._current_auto_item_items() if it.get("enabled")}
+        except Exception:
+            return
+        for chk, preset_id in ((self.sol_sc_chk, "sol_sc"), (self.sol_br_chk, "sol_br")):
+            want = self._SOL_ROW_IDS[preset_id] in on
+            if chk.isChecked() != want:
+                chk.blockSignals(True)
+                chk.setChecked(want)
+                chk.blockSignals(False)
+
+    def _sol_setup_dialog(
+        self, current: Dict[str, Optional[List[str]]]
+    ) -> Optional[Tuple[Optional[Tuple[int, int]], Dict[str, List[str]]]]:
+        """Ask which resolution Auto SC + BR uses and which accounts use each item. None = cancelled."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Auto SC + BR")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("Roblox window resolution (button clicks follow any size; smaller uses less GPU):"))
+        res_combo = QComboBox()
+        for label, size in self._SOL_RESOLUTIONS:
+            res_combo.addItem(label, size)
+        lay.addWidget(res_combo)
+        hint = QLabel("A size is applied with the Roblox Resizer (Settings), so it covers every Roblox window.")
+        hint.setProperty("role", "hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        lay.addWidget(QLabel("What each account uses (both, one, or neither):"))
+        try:
+            catalog = self._auto_item_user_catalog()
+        except Exception:
+            catalog = []
+        checks = getattr(self, "auto_item_user_checks", {}) or {}
+        default = [u for u, cb in checks.items() if cb.isChecked()] or [u for u, _ in catalog]
+        cols = (("sol_sc", 1), ("sol_br", 2))
+        chosen = {
+            pid: {str(u) for u in (current.get(pid) if current.get(pid) is not None else default)}
+            for pid, _ in cols
+        }
+        table = QTableWidget(len(catalog), 3)
+        table.setHorizontalHeaderLabels(["Account", "Strange Controller", "Biome Randomizer"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in (1, 2):
+            table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        for r, (uid, label) in enumerate(catalog):
+            name = QTableWidgetItem(f"{label}  ({uid})" if label != uid else uid)
+            name.setData(Qt.ItemDataRole.UserRole, uid)
+            table.setItem(r, 0, name)
+            for pid, c in cols:
+                cell = QTableWidgetItem()
+                cell.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                cell.setCheckState(Qt.CheckState.Checked if uid in chosen[pid] else Qt.CheckState.Unchecked)
+                table.setItem(r, c, cell)
+        lay.addWidget(table, 1)
+
+        def _set_col(c: int, on: bool) -> None:
+            state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
+            for r in range(table.rowCount()):
+                table.item(r, c).setCheckState(state)
+
+        bulk = QHBoxLayout()
+        for text, c, on in (("All SC", 1, True), ("No SC", 1, False), ("All BR", 2, True), ("No BR", 2, False)):
+            btn = QPushButton(text)
+            btn.clicked.connect(lambda _=False, c=c, on=on: _set_col(c, on))
+            bulk.addWidget(btn)
+        bulk.addStretch(1)
+        lay.addLayout(bulk)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        dlg.resize(560, 560)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        picked = {
+            pid: [
+                str(table.item(r, 0).data(Qt.ItemDataRole.UserRole))
+                for r in range(table.rowCount())
+                if table.item(r, c).checkState() == Qt.CheckState.Checked
+            ]
+            for pid, c in cols
+        }
+        return res_combo.currentData(), picked
+
+    def _sol_apply_resolution(self, width: int, height: int) -> None:
+        """Turn the Roblox Resizer on at width x height (live, and saved)."""
+        try:
+            settings = self.config_manager.load_settings() or {}
+            rz = dict(settings.get("roblox_resizer") or {})
+            rz.update(enabled=True, width=int(width), height=int(height))
+            settings["roblox_resizer"] = rz
+            self.config_manager.save_settings(settings)
+        except Exception:
+            pass
+        if hasattr(self, "resizer_enable_chk"):
+            try:
+                self.resizer_width_input.setValue(int(width))
+                self.resizer_height_input.setValue(int(height))
+                self.resizer_enable_chk.setChecked(True)
+                self._on_resizer_settings_changed()
+            except Exception:
+                pass
+        self.autoitem_log_signal.emit(f"[Auto SC + BR] Roblox windows set to {width}x{height}.")
+
+    def _sol_new_row(self, items: List[dict], preset_id: str) -> dict:
+        """Add the (disabled) row for an SC/BR preset; its switch turns it on."""
+        preset = next(p for p in self._sol_item_presets() if p["id"] == preset_id)
+        row = self._auto_item_row_from_preset(preset) or {}
+        row["id"] = self._SOL_ROW_IDS[preset_id]
+        row["enabled"] = False
+        items.append(row)
+        return row
+
+    def _sol_apply_accounts(self, items: List[dict], users_by_item: Dict[str, List[str]]) -> None:
+        """Give each SC/BR row its own account list (rows not added yet are added, off, to keep the list)."""
+        rows = self._sol_rows(items)
+        for preset_id, users in users_by_item.items():
+            row = rows.get(self._SOL_ROW_IDS[preset_id]) or self._sol_new_row(items, preset_id)
+            row["users"] = list(users)
+            row["users_explicit"] = True
+            row["user_filter_mode"] = "whitelist"
+        checks = getattr(self, "auto_item_user_checks", {}) or {}
+        for uid in {u for users in users_by_item.values() for u in users}:  # Auto-Actions only runs on accounts ticked in its user list too
+            cb = checks.get(str(uid))
+            if cb is not None and not cb.isChecked():
+                cb.setChecked(True)
+
+    def _sol_rows(self, items: List[dict]) -> Dict[str, dict]:
+        return {str(it.get("id")): it for it in items if it.get("id") in self._SOL_ROW_IDS.values()}
+
+    def _sol_current_users(self, rows: Dict[str, dict]) -> Dict[str, Optional[List[str]]]:
+        out: Dict[str, Optional[List[str]]] = {}
+        for preset_id, row_id in self._SOL_ROW_IDS.items():
+            row = rows.get(row_id) or {}
+            out[preset_id] = list(row.get("users") or []) if row.get("users_explicit") else None
+        return out
+
+    def _sol_toggle_changed(self, preset_id: str, on: bool) -> None:
+        items = self._current_auto_item_items()
+        rows = self._sol_rows(items)
+        picked_users = None
+        if on and not any(r.get("enabled") for r in rows.values()):  # first of the two turned on: ask resolution + accounts
+            picked = self._sol_setup_dialog(self._sol_current_users(rows))
+            if picked is None:
+                self._sync_sol_toggles()
+                return
+            size, picked_users = picked
+            if size:
+                self._sol_apply_resolution(*size)
+        row = rows.get(self._SOL_ROW_IDS[preset_id])
+        if row is None:
+            if not on:
+                return
+            row = self._sol_new_row(items, preset_id)
+            sibling = next((r for r in rows.values() if r.get("users_explicit")), None)
+            if picked_users is None and sibling is not None:  # older setups had one shared list
+                row["users"] = list(sibling.get("users") or [])
+                row["users_explicit"] = True
+                row["user_filter_mode"] = "whitelist"
+        row["enabled"] = bool(on)
+        if picked_users is not None:
+            self._sol_apply_accounts(items, picked_users)
+        self._load_auto_item_items_table(items)
+        self._on_auto_item_ui_changed()
+
+    def _sol_edit_setup(self) -> None:
+        items = self._current_auto_item_items()
+        picked = self._sol_setup_dialog(self._sol_current_users(self._sol_rows(items)))
+        if picked is None:
+            return
+        size, users_by_item = picked
+        if size:
+            self._sol_apply_resolution(*size)
+        self._sol_apply_accounts(items, users_by_item)
+        self._load_auto_item_items_table(items)
+        self._on_auto_item_ui_changed()
+
+    def _account_webhook_urls(self, uid: str) -> List[str]:
+        """Webhooks (Webhooks tab) this account is in: ones that list it, else ones open to every account,
+        else the alert webhook from Settings."""
+        try:
+            settings = self.config_manager.peek_settings() or {}
+            users = self.config_manager.peek_users() or {}
+        except Exception:
+            return []
+        uid_s = str(uid or "").strip()
+        info = users.get(uid_s) if isinstance(users, dict) else None
+        uname = str((info or {}).get("username") or "").strip().lower() if isinstance(info, dict) else ""
+        listed: List[str] = []
+        open_to_all: List[str] = []
+        for wh in settings.get("webhooks") or []:
+            if not isinstance(wh, dict):
+                continue
+            url = str(wh.get("url") or "").strip()
+            if not url:
+                continue
+            allowed = wh.get("users")
+            if not (bool(wh.get("users_explicit", False)) and isinstance(allowed, (list, tuple, set))):
+                open_to_all.append(url)  # no user filter: every account is in it
+                continue
+            names = {str(u).strip() for u in allowed if str(u).strip()}
+            hit = uid_s in names or (bool(uname) and uname in {n.lower() for n in names})
+            if _normalize_user_filter_mode(wh.get("user_filter_mode", "whitelist")) == "blacklist":
+                if not hit:
+                    open_to_all.append(url)
+            elif hit:
+                listed.append(url)
+        urls = listed or open_to_all
+        if not urls:
+            fallback = self.config_manager._resolve_alert_webhook_url(settings)
+            urls = [fallback] if fallback else []
+        return list(dict.fromkeys(urls))
+
+    def _sol_item_presets(self) -> List[dict]:
+        """Strange Controller / Biome Randomizer rows whose clicks follow each window's size (boxed too)."""
+        def _ui(name: str) -> dict:
+            fx, fy = sol_layout.fraction(name, 1920, 1009)  # fallback if the anchor is ever dropped
+            return {"x": round(fx, 4), "y": round(fy, 4), "ui": name}
+
+        presets = []
+        # (id, item, cooldown s): SC lasts 20 min, BR 35; +15 s so a use never lands just before it ends.
+        for preset_id, item, cooldown in (("sol_sc", "Strange Controller", 20 * 60 + 15),
+                                          ("sol_br", "Biome Randomizer", 35 * 60 + 15)):
+            actions = [
+                {"name": "Inventory button", "type": "click", "point": _ui("mainInterfaceInventory")},
+                {"name": "Wait for inventory", "type": "wait", "wait_s": 0.4},  # MMacro's settle times
+                {"name": "Items tab", "type": "click", "point": _ui("inventoryItemsTab")},
+                {"name": "Search box", "type": "click", "point": _ui("inventorySearchContent")},
+                {"name": "Paste item", "type": "paste", "text": item, "select_all": True},
+                {"name": "Wait for results", "type": "wait", "wait_s": 0.6},
+                {"name": "First result", "type": "click", "point": _ui("inventoryInvItem[1,1]")},
+                {"name": "Amount box", "type": "click", "point": _ui("inventoryUseAmount")},
+                {"name": "Paste amount", "type": "paste", "text": "1", "select_all": True},
+                {"name": "Use button", "type": "click", "point": _ui("inventoryUseButton")},
+                {"name": "Close inventory", "type": "click", "point": _ui("inventoryInvClose")},
+                {
+                    "name": "Item used alert",
+                    "type": "webhook",
+                    "webhook_url": "",  # blank = the webhook(s) this account is in, resolved at send time
+                    "webhook_message": f"{{discord_ping}} {item} use on {{username}}: screenshot taken after Use",
+                    "webhook_include_screenshot": True,
+                    "webhook_screenshot_roi": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+                    "webhook_embed_enabled": False,
+                },
+            ]
+            behavior = self._default_auto_item_behavior()
+            behavior["cooldown"] = cooldown
+            presets.append({"id": preset_id, "name": item, "builtin": True, "actions": actions, "behavior": behavior})
+        return presets
 
     def _debug_auto_item_presets(self) -> List[dict]:
         center_point = {"x": 0.5, "y": 0.5}
@@ -18508,8 +13463,12 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             seen_preset_ids.add(preset_id)
             preset_list.append(preset)
 
+        # SC/BR built-ins hold no user state: always the current version
+        preset_list = [p for p in preset_list if p.get("id") not in ("sol_sc", "sol_br")]
         if "item" not in seen_preset_ids:
             preset_list = self._default_auto_item_presets(legacy_coords) + preset_list
+        else:
+            preset_list += self._sol_item_presets()
 
         items: List[dict] = []
         seen_row_ids: set[str] = set()
@@ -18527,6 +13486,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             "enabled": bool(base.get("enabled", False)),
             "tick_interval": float(base.get("tick_interval", 1.0) or 1.0),
             "click_delay": float(base.get("click_delay", 0.2) or 0.2),
+            "min_fps": min(240, max(1, int(base.get("min_fps", 60) or 60))),
             "antiafk_auto_action_overdue_min": self._clamp_antiafk_overdue_minutes(
                 base.get("antiafk_auto_action_overdue_min", _ANTIAFK_AUTO_ACTION_OVERDUE_MIN_DEFAULT)
             ),
@@ -18580,31 +13540,27 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         trigger_type = str(trigger.get("type") or "normal")
         filters = list(trigger.get("filter_ids", [])) if trigger_type == "ocr_filter" else []
         merchants = list(trigger.get("merchants", [])) if trigger_type == "merchant" else []
-        if mode == "count":
-            mode_text = f"Max {max(1, int(cfg.get('repeat_count', 1) or 1))} / startup"
-        elif mode == "count_per_trigger":
-            mode_text = f"x{max(1, int(cfg.get('repeat_count', 1) or 1))} / trigger"
-        elif mode == "once_per_pid":
-            mode_text = "1 per PID"
-        else:
-            mode_text = "Loop"
+        def _dur(sec: int) -> str:
+            m, sec = divmod(int(sec), 60)
+            return f"{m} min {sec} s" if m and sec else f"{m} min" if m else f"{sec} s"
 
         if trigger_type == "merchant" and merchants:
-            trigger_text = merchants[0] if len(merchants) == 1 else f"{len(merchants)} merchants"
+            text = f"When {merchants[0]} arrives" if len(merchants) == 1 else "When a merchant arrives"
         elif trigger_type == "action_row":
-            trigger_text = "Action row"
+            text = "When another row calls it"
         elif filters:
-            trigger_text = "1 filter" if len(filters) == 1 else f"{len(filters)} filters"
+            text = "When chat matches " + ("1 filter" if len(filters) == 1 else f"{len(filters)} filters")
         else:
-            trigger_text = "No trigger"
-
-        parts = [trigger_text, mode_text]
+            text = f"Every {_dur(cooldown)}" if cooldown > 0 else "Over and over"
+        count = max(1, int(cfg.get("repeat_count", 1) or 1))
+        text += {"count": f", at most {count} times", "count_per_trigger": f", {count} times each time",
+                 "once_per_pid": ", once per Roblox window"}.get(mode, "")
+        if trigger_type != "normal" and cooldown > 0:
+            text += f", {_dur(cooldown)} apart"
         startup_delay = int(cfg.get("startup_delay", 10))
         if startup_delay > 0:
-            parts.append(f"Start {startup_delay}s")
-        if cooldown > 0:
-            parts.append(f"Cooldown {cooldown}s")
-        return " | ".join(parts)
+            text += f", first after {_dur(startup_delay)}"
+        return text
 
     def _auto_item_actions_tooltip(self, actions: List[dict]) -> str:
         actions = [a for a in (actions or []) if isinstance(a, dict)]
@@ -18684,40 +13640,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         lines.append("")
         lines.append("Click to edit behavior.")
         return "\n".join(lines)
-
-    def _auto_item_apply_cell_button_style(self, btn: QPushButton, *, accent: bool = False) -> None:
-        try:
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        except Exception:
-            pass
-        btn.setMinimumHeight(42)
-        btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        border_color = ModernStyle.PRIMARY if accent else ModernStyle.BORDER
-        btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background-color: {ModernStyle.SURFACE_VARIANT};
-                color: {ModernStyle.TEXT_PRIMARY};
-                border: 1px solid {border_color};
-                border-radius: 9px;
-                padding: 8px 12px;
-                font-weight: 600;
-                text-align: left;
-            }}
-            QPushButton:hover {{
-                background-color: {ModernStyle.SURFACE};
-                border-color: {ModernStyle.PRIMARY};
-            }}
-            QPushButton:pressed {{
-                background-color: {ModernStyle.SURFACE};
-            }}
-            QPushButton:disabled {{
-                background-color: {ModernStyle.SURFACE_VARIANT};
-                color: {ModernStyle.TEXT_SECONDARY};
-                border-color: {ModernStyle.BORDER};
-            }}
-            """
-        )
 
     def _get_primary_button_style(self) -> str:
         return f"""
@@ -19247,6 +14169,15 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             capture_btn = QPushButton("Capture Point")
             capture_btn.setToolTip("Minimize the app overlay and click inside the game window to sample a point.")
             capture_btn.setStyleSheet(self._get_primary_button_style())
+            anchor_combo = QComboBox()
+            anchor_combo.addItem("Fixed point (as captured)", "")
+            for ui_name, ui_label in sol_layout.LABELS.items():
+                anchor_combo.addItem(f"Sol's RNG: {ui_label}", ui_name)
+            anchor_combo.setCurrentIndex(max(0, anchor_combo.findData(str((point or {}).get("ui") or ""))))
+            anchor_combo.setToolTip(
+                "Anchor this click to a Sol's RNG button: it is found again at every window size "
+                "(boxed 800x600, small screens, ultrawide). The x, y point is only a fallback."
+            )
 
             def _capture() -> None:
                 result = self._capture_auto_item_point(sample_color=False)
@@ -19259,6 +14190,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                         "y": float(point_val.get("y", 0.0)),
                     }
                     point_le.setText(_point_text(action["point"]))
+                    anchor_combo.setCurrentIndex(0)  # a captured point is meant literally
 
             capture_btn.clicked.connect(_capture)
             row = QHBoxLayout()
@@ -19267,6 +14199,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             holder = QWidget()
             holder.setLayout(row)
             target_layout.addWidget(holder)
+            target_layout.addWidget(anchor_combo)
             layout.addWidget(target_group)
 
         if action_type == "drag":
@@ -19528,7 +14461,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             webhook_layout.addWidget(webhook_hint)
             webhook_form = QFormLayout()
             webhook_url_le = QLineEdit(str(action.get("webhook_url") or ""))
-            webhook_url_le.setPlaceholderText("https://discord.com/api/webhooks/...")
+            webhook_url_le.setPlaceholderText("Blank = this account's webhook(s) (https://discord.com/api/webhooks/...)")
             try:
                 webhook_url_le.setClearButtonEnabled(True)
             except Exception:
@@ -19947,6 +14880,12 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             action_end_point = copy.deepcopy(action.get("end_point"))
             if action_type in ("click", "scroll"):
                 action_point = _point_from_text("Action point", point_le.text())
+                ui_name = str(anchor_combo.currentData() or "")
+                if ui_name:
+                    if action_point is None:
+                        fx, fy = sol_layout.fraction(ui_name, 1920, 1009)
+                        action_point = {"x": round(fx, 4), "y": round(fy, 4)}
+                    action_point["ui"] = ui_name
             if action_type == "drag":
                 action_point = _point_from_text("Drag start point", start_point_le.text())
                 action_end_point = _point_from_text("Drag end point", end_point_le.text())
@@ -20195,7 +15134,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                     options.append("embed")
                 option_suffix = f" | {', '.join(options)}" if options else ""
                 return (
-                    f"Webhook {'configured' if has_url else 'missing URL'}: "
+                    f"Webhook {'configured' if has_url else 'to account webhooks'}: "
                     f"'{msg or '(default message)'}'{option_suffix}{cond_suffix}"
                 )
             if kind == "action_row":
@@ -20233,7 +15172,11 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             if isinstance(point, dict):
                 button = "Right" if str(action.get("click_button") or "left") == "right" else "Left"
                 dbl = " double" if int(action.get("click_count", 1) or 1) >= 2 else ""
-                return f"{button}{dbl} click {float(point.get('x', 0.0)):.4f}, {float(point.get('y', 0.0)):.4f}{cond_suffix}"
+                if point.get("ui"):
+                    where = sol_layout.LABELS.get(str(point["ui"]), str(point["ui"])) + " (any window size)"
+                else:
+                    where = f"{float(point.get('x', 0.0)):.4f}, {float(point.get('y', 0.0)):.4f}"
+                return f"{button}{dbl} click {where}{cond_suffix}"
             return f"No point{cond_suffix}"
 
         def _refresh() -> None:
@@ -21048,7 +15991,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         intro = QLabel(
             "Use presets to keep common action sequences and behavior settings reusable, exportable, and easy to drop into new rows."
-            " Save table rows from the main Auto Actions tab with the Save Selected Rows button."
+            " Save a row as a preset from its More menu on Action rows."
         )
         intro.setProperty("role", "hint")
         intro.setWordWrap(True)
@@ -21177,7 +16120,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                     msg = str(action.get("webhook_message") or "").replace("\r", " ").replace("\n", " ").strip()
                     if len(msg) > 70:
                         msg = msg[:67] + "..."
-                    lines.append(f"    Webhook: {'configured' if url else 'missing URL'}")
+                    lines.append(f"    Webhook: {'configured' if url else 'account webhooks'}")
                     lines.append(f"    Message: {msg or '(default message)'}")
                     lines.append(
                         "    Screenshot: "
@@ -21385,7 +16328,9 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             if row < 0:
                 return
             if bool(presets[row].get("builtin", False)) or str(presets[row].get("id") or "") == "item":
-                QMessageBox.information(self, "Action Presets", "The built-in Item preset cannot be removed.")
+                QMessageBox.information(
+                    self, "Action Presets", f"The built-in {presets[row].get('name') or 'Item'} preset cannot be removed."
+                )
                 return
             presets.pop(row)
             _refresh_list()
@@ -21448,269 +16393,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         close_row.addWidget(close_btn)
         layout.addLayout(close_row)
         dlg.exec()
-
-    def setup_auto_item_tab(self):
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        auto_widget = QWidget()
-        scroll.setWidget(auto_widget)
-        layout = QVBoxLayout(auto_widget)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
-
-        info_group = QGroupBox("Auto Actions")
-        info_layout = QVBoxLayout(info_group)
-        info_layout.setSpacing(6)
-        desc = QLabel(
-            "Chain clicks, drags, keyboard presses, pastes, scrolls, waits, webhooks, immediate action-row calls, conditionals, loops, and control flow into reusable rows."
-        )
-        desc.setWordWrap(True)
-        desc.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
-        info_layout.addWidget(desc)
-        sub_desc = QLabel(
-            "Each row carries its own action string, normal, OCR, merchant, or action-row trigger, cooldown/biome behavior, "
-            "and optional user targeting"
-        )
-        sub_desc.setWordWrap(True)
-        sub_desc.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
-        info_layout.addWidget(sub_desc)
-        layout.addWidget(info_group)
-
-        settings_group = QGroupBox("Settings")
-        settings_layout = QGridLayout(settings_group)
-        settings_layout.setHorizontalSpacing(16)
-        settings_layout.setVerticalSpacing(12)
-        settings_layout.setColumnStretch(0, 0)
-        settings_layout.setColumnStretch(1, 1)
-
-        self.auto_item_enable_chk = QCheckBox("Enable Auto-Actions (while manager is running)")
-        settings_layout.addWidget(self.auto_item_enable_chk, 0, 0, 1, 2)
-
-        settings_layout.addWidget(QLabel("Tick interval (seconds):"), 1, 0)
-        self.auto_item_tick_spin = QDoubleSpinBox()
-        self.auto_item_tick_spin.setRange(0.2, 60.0)
-        self.auto_item_tick_spin.setDecimals(2)
-        self.auto_item_tick_spin.setSingleStep(0.1)
-        self.auto_item_tick_spin.setValue(1.0)
-        settings_layout.addWidget(self.auto_item_tick_spin, 1, 1)
-
-        settings_layout.addWidget(QLabel("Click/paste delay (seconds):"), 2, 0)
-        self.auto_item_delay_spin = QDoubleSpinBox()
-        self.auto_item_delay_spin.setRange(0.01, 2.0)
-        self.auto_item_delay_spin.setDecimals(2)
-        self.auto_item_delay_spin.setSingleStep(0.05)
-        self.auto_item_delay_spin.setValue(0.2)
-        settings_layout.addWidget(self.auto_item_delay_spin, 2, 1)
-
-        settings_layout.addWidget(QLabel("Auto-Actions overdue threshold (minutes):"), 3, 0)
-        self.auto_item_antiafk_overdue_minutes_spin = QDoubleSpinBox()
-        self.auto_item_antiafk_overdue_minutes_spin.setRange(1.0, 15.0)
-        self.auto_item_antiafk_overdue_minutes_spin.setDecimals(1)
-        self.auto_item_antiafk_overdue_minutes_spin.setSingleStep(0.5)
-        self.auto_item_antiafk_overdue_minutes_spin.setValue(_ANTIAFK_AUTO_ACTION_OVERDUE_MIN_DEFAULT)
-        self.auto_item_antiafk_overdue_minutes_spin.setToolTip(
-            "Auto-Actions will stop pausing Anti-AFK when any connected user is near this age."
-        )
-        settings_layout.addWidget(self.auto_item_antiafk_overdue_minutes_spin, 3, 1)
-
-        self.auto_item_disable_mouse_chk = QCheckBox("Disable user mouse movement during Auto-Actions")
-        settings_layout.addWidget(self.auto_item_disable_mouse_chk, 4, 0, 1, 2)
-        try:
-            self._update_auto_item_disable_mouse_tooltip()
-        except Exception:
-            pass
-
-        self.auto_item_menu_debug_chk = QCheckBox("Log in-menu status when sequences activate")
-        self.auto_item_menu_debug_chk.setToolTip("Writes PID, HWND, Roblox log filename, biome, menu state, and menu-gate age before each Auto-Actions sequence plays.")
-        settings_layout.addWidget(self.auto_item_menu_debug_chk, 5, 0, 1, 2)
-
-        settings_layout.addWidget(QLabel("Toggle hotkey:"), 6, 0)
-        self.auto_item_hotkey_edit = QKeySequenceEdit()
-        self.auto_item_hotkey_edit.setToolTip("Global hotkey to toggle Auto-Actions enable/disable (default: Ctrl+Alt+Space).")
-        try:
-            self.auto_item_hotkey_edit.setKeySequence(QKeySequence("Ctrl+Alt+Space"))
-        except Exception:
-            pass
-        self.auto_item_hotkey_edit.setMinimumWidth(220)
-        settings_layout.addWidget(self.auto_item_hotkey_edit, 6, 1)
-
-        layout.addWidget(settings_group)
-
-        items_group = QGroupBox("Action Rows")
-        items_layout = QVBoxLayout(items_group)
-        items_layout.setSpacing(10)
-
-        self.auto_item_table = QTableWidget()
-        self.auto_item_table.setColumnCount(6)
-        self.auto_item_table.setHorizontalHeaderLabels(["Enabled", "Name", "Actions", "Behavior", "Users", "Alert"])
-        self.auto_item_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.auto_item_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.auto_item_table.setShowGrid(False)
-        self.auto_item_table.setAlternatingRowColors(False)
-        self.auto_item_table.setWordWrap(False)
-        self.auto_item_table.verticalHeader().setVisible(False)
-        self.auto_item_table.setTextElideMode(Qt.TextElideMode.ElideRight)
-        header = self.auto_item_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        header.setMinimumSectionSize(72)
-        self.auto_item_table.setColumnWidth(0, 72)
-        self.auto_item_table.setMinimumHeight(440)
-        try:
-            self.auto_item_table.setColumnHidden(5, not _bm_relaxed())
-        except Exception:
-            pass
-        self._auto_item_apply_main_table_style(self.auto_item_table)
-        items_layout.addWidget(self.auto_item_table)
-
-        rows_hint = QLabel(
-            "Use presets to drop in reusable sequences."
-        )
-        rows_hint.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
-        rows_hint.setWordWrap(True)
-        items_layout.addWidget(rows_hint)
-
-        items_btn_row = QHBoxLayout()
-        items_btn_row.setSpacing(8)
-        add_item_btn = QPushButton("Add Action")
-        add_item_btn.clicked.connect(self._auto_item_add_item)
-        remove_item_btn = QPushButton("Remove Selected")
-        remove_item_btn.clicked.connect(self._auto_item_remove_selected_items)
-        save_rows_btn = QPushButton("Save Selected")
-        save_rows_btn.clicked.connect(self._auto_item_save_selected_rows_as_presets)
-        test_btn = QPushButton("Test Selected")
-        test_btn.clicked.connect(self._auto_item_test_once)
-        self.auto_item_test_btn = test_btn
-        up_btn = QPushButton("Move Up")
-        up_btn.clicked.connect(lambda: self._auto_item_move_selected(-1))
-        down_btn = QPushButton("Move Down")
-        down_btn.clicked.connect(lambda: self._auto_item_move_selected(1))
-        presets_btn = QPushButton("Presets")
-        presets_btn.clicked.connect(self._open_auto_item_presets_dialog)
-        monitor_btn = QPushButton("Monitor")
-        monitor_btn.setToolTip("Open a live view of users, actions, cooldowns, triggers, and runtime status.")
-        monitor_btn.clicked.connect(self._open_auto_item_monitor)
-        for btn in (add_item_btn, remove_item_btn, save_rows_btn, test_btn, up_btn, down_btn, presets_btn, monitor_btn):
-            items_btn_row.addWidget(btn)
-        items_btn_row.addStretch()
-        items_layout.addLayout(items_btn_row)
-
-        layout.addWidget(items_group)
-
-        users_group = QGroupBox("Users")
-        users_layout = QVBoxLayout(users_group)
-
-        users_filter_row = QHBoxLayout()
-        users_filter_row.setSpacing(8)
-        users_filter_row.addWidget(QLabel("Mode:"))
-        self.auto_item_user_filter_mode_combo = QComboBox()
-        self.auto_item_user_filter_mode_combo.addItem("Whitelist", "whitelist")
-        self.auto_item_user_filter_mode_combo.addItem("Blacklist", "blacklist")
-        self.auto_item_user_filter_mode_combo.setToolTip(
-            "Whitelist targets only checked users. Blacklist targets everyone except checked users."
-        )
-        self.auto_item_user_filter_mode_combo.setProperty("previous_mode", "whitelist")
-        users_filter_row.addWidget(self.auto_item_user_filter_mode_combo)
-
-        self.auto_item_user_search_input = QLineEdit()
-        self.auto_item_user_search_input.setPlaceholderText("Search username or user ID...")
-        self.auto_item_user_search_input.setToolTip("Filter this list without changing which users are checked.")
-        try:
-            self.auto_item_user_search_input.setClearButtonEnabled(True)
-        except Exception:
-            pass
-        users_filter_row.addWidget(self.auto_item_user_search_input, 1)
-        users_layout.addLayout(users_filter_row)
-
-        users_btn_row = QHBoxLayout()
-        sel_all_btn = QPushButton("Select All")
-        sel_all_btn.clicked.connect(lambda: self._auto_item_set_all_users(True))
-        sel_none_btn = QPushButton("Select None")
-        sel_none_btn.clicked.connect(lambda: self._auto_item_set_all_users(False))
-        users_btn_row.addWidget(sel_all_btn)
-        users_btn_row.addWidget(sel_none_btn)
-        users_btn_row.addStretch()
-        users_layout.addLayout(users_btn_row)
-
-        self.auto_item_users_hint = QLabel()
-        self.auto_item_users_hint.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
-        self.auto_item_users_hint.setWordWrap(True)
-        users_layout.addWidget(self.auto_item_users_hint)
-
-        self.auto_item_users_container = QWidget()
-        self.auto_item_users_vbox = QVBoxLayout(self.auto_item_users_container)
-        self.auto_item_users_vbox.setContentsMargins(0, 0, 0, 0)
-        self.auto_item_users_vbox.setSpacing(4)
-        self.auto_item_user_checks = {}
-        self._auto_item_user_list_initialized = False
-
-        users_scroll = QScrollArea()
-        users_scroll.setWidgetResizable(True)
-        users_scroll.setWidget(self.auto_item_users_container)
-        users_scroll.setMinimumHeight(180)
-        users_scroll.setMinimumWidth(280)
-        users_layout.addWidget(users_scroll)
-
-        log_group = QGroupBox("Auto-Actions Log")
-        log_layout = QVBoxLayout(log_group)
-        log_hint = QLabel("Runtime messages, trigger activity, and manual tests are written here.")
-        log_hint.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY};")
-        log_hint.setWordWrap(True)
-        log_layout.addWidget(log_hint)
-        self.autoitem_status_box = QTextEdit()
-        self.autoitem_status_box.setReadOnly(True)
-        self.autoitem_status_box.setFont(QFont("Consolas", 10))
-        self.autoitem_status_box.setMinimumHeight(180)
-        try:
-            self.autoitem_status_box.document().setMaximumBlockCount(5000)
-        except Exception:
-            pass
-        log_layout.addWidget(self.autoitem_status_box)
-
-        lower_row = QHBoxLayout()
-        lower_row.setSpacing(14)
-        lower_row.addWidget(users_group, 1)
-        lower_row.addWidget(log_group, 2)
-        layout.addLayout(lower_row)
-
-        footer = QHBoxLayout()
-        footer.addStretch()
-        reset_btn = QPushButton("Restore Auto-Actions Defaults")
-        reset_btn.clicked.connect(self._reset_auto_item_to_defaults)
-        footer.addWidget(reset_btn)
-        layout.addLayout(footer)
-        layout.addStretch()
-
-        self._auto_item_presets = []
-        self._auto_item_save_timer = QTimer(self)
-        self._auto_item_save_timer.setSingleShot(True)
-        self._auto_item_save_timer.timeout.connect(self._save_auto_item_settings)
-        self._auto_item_users_refresh_timer = QTimer(self)
-        self._auto_item_users_refresh_timer.setInterval(1000)
-        self._auto_item_users_refresh_timer.timeout.connect(self._auto_item_refresh_users_if_changed)
-
-        self.auto_item_enable_chk.toggled.connect(self._on_auto_item_enabled_toggled)
-        self.auto_item_tick_spin.valueChanged.connect(self._on_auto_item_ui_changed)
-        self.auto_item_delay_spin.valueChanged.connect(self._on_auto_item_ui_changed)
-        self.auto_item_disable_mouse_chk.toggled.connect(self._on_auto_item_mouse_toggle_changed)
-        self.auto_item_menu_debug_chk.toggled.connect(self._on_auto_item_ui_changed)
-        self.auto_item_antiafk_overdue_minutes_spin.valueChanged.connect(self._on_auto_item_ui_changed)
-        self.auto_item_hotkey_edit.keySequenceChanged.connect(self._on_auto_item_hotkey_changed)
-        self.auto_item_user_filter_mode_combo.currentIndexChanged.connect(
-            self._on_auto_item_user_filter_mode_changed
-        )
-        self.auto_item_user_search_input.textChanged.connect(self._auto_item_filter_users)
-
-        self._auto_item_refresh_users()
-        self._load_auto_item_settings()
-        self._ensure_auto_item_engine()
-        self._auto_item_users_refresh_timer.start()
-
-        self.tab_widget.addTab(scroll, "Auto Actions")
 
     def _open_auto_item_monitor(self) -> None:
         self._ensure_auto_item_engine()
@@ -21852,22 +16534,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             if candidate is btn:
                 return row
         return -1
-
-    def _auto_item_edit_selected_paste_values(self) -> None:
-        table = getattr(self, "auto_item_table", None)
-        if not isinstance(table, QTableWidget):
-            return
-        rows = sorted({idx.row() for idx in table.selectedIndexes()})
-        if not rows:
-            current_row = table.currentRow()
-            if current_row >= 0:
-                rows = [current_row]
-        if len(rows) != 1:
-            QMessageBox.information(self, "Paste Values", "Select exactly one action row first.")
-            return
-
-        row = int(rows[0])
-        self._auto_item_edit_paste_values_for_row(row)
 
     def _auto_item_edit_paste_values_for_row(self, row: int, *, parent: Optional[QWidget] = None) -> None:
         table = getattr(self, "auto_item_table", None)
@@ -22166,19 +16832,27 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             QMessageBox.warning(self, "Auto-Actions Test", error or "Could not resolve the last-selected Roblox window.")
             return
 
-        try:
-            ok = bool(
-                self.auto_item_engine.test_once(
-                    target_uid,
-                    row_indices=rows,
-                    target_pid=target_pid,
-                    target_hwnd=target_hwnd,
-                )
-            )
-        except Exception as e:
-            self.autoitem_log_signal.emit(f"[Auto-Actions] Test: error: {e}")
-            ok = False
+        engine = self.auto_item_engine
+        rows = list(rows)
 
+        def _run() -> None:  # off the UI thread: at 1-2 FPS one test can take most of a minute
+            try:
+                ok = bool(
+                    engine.test_once(
+                        target_uid,
+                        row_indices=rows,
+                        target_pid=target_pid,
+                        target_hwnd=target_hwnd,
+                    )
+                )
+            except Exception as e:
+                self.autoitem_log_signal.emit(f"[Auto-Actions] Test: error: {e}")
+                ok = False
+            self.autoitem_test_result_signal.emit(ok)
+
+        threading.Thread(target=_run, name="AutoActionsTest", daemon=True).start()
+
+    def _on_auto_item_test_finished(self, ok: bool) -> None:
         if ok:
             QMessageBox.information(self, "Auto-Actions Test", "Test run complete. Check the Auto-Actions log for details.")
         else:
@@ -22190,7 +16864,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             QMessageBox.warning(self, "Auto Actions", "Auto-Actions engine is not available.")
             return
         if not self._is_manager_running():
-            QMessageBox.information(self, "Auto-Actions Test", "Start the manager first so a user window can be resolved.")
+            QMessageBox.information(self, "Auto-Actions Test", "Start the manager first; the test runs on the first Roblox window.")
             return
 
         rows = sorted({idx.row() for idx in self.auto_item_table.selectedIndexes()})
@@ -22204,118 +16878,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             pass
 
         self._auto_item_run_last_selected_test(rows)
-
-    def _load_auto_item_items_table(self, items: List[dict]):
-        self.auto_item_table.setRowCount(0)
-
-        def _wrap_cell(w: QWidget, *, center: bool = False, margins: Tuple[int, int, int, int] = (0, 6, 0, 6)) -> QWidget:
-            holder = QWidget()
-            holder.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-            holder.setStyleSheet("background: transparent;")
-            lay = QHBoxLayout(holder)
-            lay.setContentsMargins(*margins)
-            lay.setSpacing(0)
-            if center:
-                lay.addStretch(1)
-                lay.addWidget(w, 0, Qt.AlignmentFlag.AlignCenter)
-                lay.addStretch(1)
-            else:
-                lay.addWidget(w, 1, Qt.AlignmentFlag.AlignVCenter)
-            return holder
-
-        for item in (items or []):
-            row_id = str(item.get("id") or item.get("row_id") or f"row_{uuid.uuid4().hex}").strip()
-            if not row_id:
-                row_id = f"row_{uuid.uuid4().hex}"
-            row = self.auto_item_table.rowCount()
-            self.auto_item_table.insertRow(row)
-            try:
-                self.auto_item_table.setRowHeight(row, 80)
-            except Exception:
-                pass
-
-            enabled = QCheckBox()
-            enabled.setChecked(bool(item.get("enabled", True)))
-            enabled.toggled.connect(self._on_auto_item_ui_changed)
-            self.auto_item_table.setCellWidget(row, 0, _wrap_cell(enabled, center=True))
-
-            name = QLineEdit(str(item.get("name") or ""))
-            name.setPlaceholderText("Name this action row")
-            name.setMinimumWidth(180)
-            try:
-                name.setClearButtonEnabled(True)
-            except Exception:
-                pass
-            name.setToolTip("This label is used in presets, alerts, and manual tests.")
-            name.textChanged.connect(self._on_auto_item_ui_changed)
-            self.auto_item_table.setCellWidget(row, 1, _wrap_cell(name, margins=(6, 6, 6, 6)))
-
-            actions_btn = QPushButton()
-            actions_btn.setProperty("row_id", row_id)
-            normalized_actions = []
-            for idx, raw_action in enumerate(item.get("actions") or []):
-                action = self._normalize_auto_item_action(raw_action, fallback_name=f"Action {idx + 1}")
-                if action is not None:
-                    normalized_actions.append(action)
-            actions_btn.setProperty("actions", normalized_actions)
-            self._auto_item_apply_cell_button_style(actions_btn, accent=True)
-            self._update_actions_btn_text(actions_btn)
-            actions_btn.clicked.connect(lambda _, b=actions_btn: self._edit_item_actions(b))
-            self.auto_item_table.setCellWidget(row, 2, _wrap_cell(actions_btn, margins=(6, 6, 6, 6)))
-
-            behavior_btn = QPushButton()
-            behavior_btn.setProperty("behavior", self._normalize_auto_item_behavior(item.get("behavior"), legacy=item))
-            self._auto_item_apply_cell_button_style(behavior_btn)
-            self._update_behavior_btn_text(behavior_btn)
-            behavior_btn.clicked.connect(lambda _, b=behavior_btn: self._edit_item_behavior(b))
-            self.auto_item_table.setCellWidget(row, 3, _wrap_cell(behavior_btn, margins=(6, 6, 6, 6)))
-
-            users_btn = QPushButton()
-            raw_users = item.get("users", None)
-            users_prop = None
-            if raw_users is None:
-                users_prop = None
-            elif isinstance(raw_users, (list, tuple, set)):
-                users_list = [str(u).strip() for u in raw_users if str(u).strip()]
-                users_prop = users_list if users_list or bool(item.get("users_explicit", False)) else None
-            elif isinstance(raw_users, str):
-                try:
-                    parsed_users = json.loads(raw_users)
-                except Exception:
-                    parsed_users = [
-                        part.strip()
-                        for part in raw_users.replace("\r", "\n").replace("\n", ",").split(",")
-                        if part.strip()
-                    ]
-                if isinstance(parsed_users, (list, tuple, set)):
-                    users_list = [str(u).strip() for u in parsed_users if str(u).strip()]
-                else:
-                    users_list = [str(parsed_users).strip()] if str(parsed_users).strip() else []
-                users_prop = users_list if users_list or bool(item.get("users_explicit", False)) else None
-            else:
-                try:
-                    if not isinstance(raw_users, dict):
-                        users_list = [str(u).strip() for u in list(raw_users) if str(u).strip()]  # type: ignore[arg-type]
-                        users_prop = users_list if users_list or bool(item.get("users_explicit", False)) else None
-                except Exception:
-                    users_prop = None
-            users_btn.setProperty("users", users_prop)
-            users_btn.setProperty("user_filter_mode", _normalize_user_filter_mode(item.get("user_filter_mode", "whitelist")))
-            users_btn.setProperty("discord_user_edit_enabled", bool(item.get("discord_user_edit_enabled", False)))
-            self._auto_item_apply_cell_button_style(users_btn)
-            self._update_users_btn_text(users_btn)
-            users_btn.clicked.connect(lambda _, b=users_btn: self._edit_item_users(b))
-            self.auto_item_table.setCellWidget(row, 4, _wrap_cell(users_btn, margins=(6, 6, 6, 6)))
-
-            alert_btn = QPushButton()
-            alert_btn.setProperty("alert_enabled", bool(item.get("alert_enabled", False)))
-            alert_btn.setProperty("alert_webhook", str(item.get("alert_webhook") or "").strip())
-            alert_btn.setProperty("alert_message", str(item.get("alert_message") or ""))
-            alert_btn.setProperty("alert_lead_s", float(item.get("alert_lead_s", 15.0) or 15.0))
-            self._auto_item_apply_cell_button_style(alert_btn)
-            self._update_alert_btn_text(alert_btn)
-            alert_btn.clicked.connect(lambda _, b=alert_btn: self._edit_item_alert(b))
-            self.auto_item_table.setCellWidget(row, 5, _wrap_cell(alert_btn, margins=(6, 6, 6, 6)))
 
     def _current_auto_item_items(self) -> List[dict]:
         items: List[dict] = []
@@ -22393,6 +16955,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             "enabled": bool(self.auto_item_enable_chk.isChecked()),
             "tick_interval": float(self.auto_item_tick_spin.value()),
             "click_delay": float(self.auto_item_delay_spin.value()),
+            "min_fps": int(self.auto_item_min_fps_spin.value()),
             "antiafk_auto_action_overdue_min": self._clamp_antiafk_overdue_minutes(
                 self.auto_item_antiafk_overdue_minutes_spin.value()
             ),
@@ -22446,6 +17009,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             self.auto_item_enable_chk.setChecked(bool(merged.get("enabled", False)))
             self.auto_item_tick_spin.setValue(float(merged.get("tick_interval", 1.0) or 1.0))
             self.auto_item_delay_spin.setValue(float(merged.get("click_delay", 0.2) or 0.2))
+            self.auto_item_min_fps_spin.setValue(int(merged.get("min_fps", 60) or 60))
             self.auto_item_antiafk_overdue_minutes_spin.setValue(overdue_minutes)
             self.auto_item_disable_mouse_chk.setChecked(bool(merged.get("disable_mouse_move", False)))
             self.auto_item_menu_debug_chk.setChecked(bool(merged.get("menu_debug", False)))
@@ -22483,6 +17047,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             self.auto_item_enable_chk.setChecked(bool(defaults.get("enabled", False)))
             self.auto_item_tick_spin.setValue(float(defaults.get("tick_interval", 1.0) or 1.0))
             self.auto_item_delay_spin.setValue(float(defaults.get("click_delay", 0.2) or 0.2))
+            self.auto_item_min_fps_spin.setValue(int(defaults.get("min_fps", 60) or 60))
             self.auto_item_antiafk_overdue_minutes_spin.setValue(
                 self._clamp_antiafk_overdue_minutes(
                     defaults.get(
@@ -22518,169 +17083,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
     # ------------------------
     # BES tab + controller
     # ------------------------
-
-    def setup_bes_tab(self):
-        bes_widget = QWidget()
-        layout = QVBoxLayout(bes_widget)
-
-        if self.bes_controller is None:
-            msg = QLabel("BES throttling is unavailable on this system/build.")
-            msg.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-            layout.addWidget(msg)
-            layout.addStretch(1)
-            self.tab_widget.addTab(bes_widget, "BES")
-            return
-
-        top_group = QGroupBox("BES - Battle Encoder Shirase")
-        top_layout = QGridLayout(top_group)
-
-        self.bes_enable_chk = QCheckBox("Enable throttling for all Roblox processes")
-        top_layout.addWidget(self.bes_enable_chk, 0, 0, 1, 3)
-
-        top_layout.addWidget(QLabel("Cycle (ms):"), 1, 0)
-        self.bes_cycle_spin = QSpinBox()
-        self.bes_cycle_spin.setRange(10, 1000)
-        self.bes_cycle_spin.setSingleStep(5)
-        self.bes_cycle_spin.setValue(50)
-        top_layout.addWidget(self.bes_cycle_spin, 1, 1)
-
-        self.bes_status_label = QLabel("Status: Disabled")
-        self.bes_status_label.setWordWrap(True)
-        self.bes_status_label.setMinimumWidth(0)
-        self.bes_status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.bes_status_label.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        top_layout.addWidget(self.bes_status_label, 1, 2)
-
-        top_layout.addWidget(QLabel("Mode:"), 2, 0)
-        self.bes_mode_combo = QComboBox()
-        self.bes_mode_combo.addItem("All threads", "all_threads")
-        self.bes_mode_combo.addItem("Smart throttle", "smart")
-        top_layout.addWidget(self.bes_mode_combo, 2, 1)
-
-        top_layout.addWidget(QLabel("Smart threads / process:"), 3, 0)
-        self.bes_smart_count_spin = QSpinBox()
-        self.bes_smart_count_spin.setRange(1, 256)
-        self.bes_smart_count_spin.setValue(4)
-        self.bes_smart_count_spin.setToolTip("In Smart throttle mode, BES throttles only the highest-CPU Roblox threads per process.")
-        top_layout.addWidget(self.bes_smart_count_spin, 3, 1)
-
-        layout.addWidget(top_group)
-
-        levels_group = QGroupBox("Throttle Levels")
-        levels_layout = QGridLayout(levels_group)
-
-        levels_layout.addWidget(QLabel("Main menu:"), 0, 0)
-        self.bes_menu_slider = QSlider(Qt.Orientation.Horizontal)
-        self.bes_menu_slider.setRange(0, 99)
-        self.bes_menu_slider.setValue(85)
-        self.bes_menu_val = QLabel("85%")
-        levels_layout.addWidget(self.bes_menu_slider, 0, 1)
-        levels_layout.addWidget(self.bes_menu_val, 0, 2)
-
-        levels_layout.addWidget(QLabel("Outside main menu:"), 1, 0)
-        self.bes_game_slider = QSlider(Qt.Orientation.Horizontal)
-        self.bes_game_slider.setRange(0, 99)
-        self.bes_game_slider.setValue(50)
-        self.bes_game_val = QLabel("50%")
-        levels_layout.addWidget(self.bes_game_slider, 1, 1)
-        levels_layout.addWidget(self.bes_game_val, 1, 2)
-
-        layout.addWidget(levels_group)
-
-        exempt_group = QGroupBox("Exempt Users")
-        exempt_layout = QGridLayout(exempt_group)
-
-        self.bes_exempt_combos: List[QComboBox] = []
-        for i in range(3):
-            exempt_layout.addWidget(QLabel(f"Slot {i + 1}:"), i, 0)
-            combo = QComboBox()
-            combo.setMinimumWidth(280)
-            self.bes_exempt_combos.append(combo)
-            exempt_layout.addWidget(combo, i, 1, 1, 2)
-
-        refresh_btn = QPushButton("Refresh User List")
-        refresh_btn.clicked.connect(self._bes_refresh_user_list)
-        exempt_layout.addWidget(refresh_btn, 3, 0, 1, 3)
-
-        layout.addWidget(exempt_group)
-
-        auto_group = QGroupBox("Auto Action Pacify")
-        auto_layout = QGridLayout(auto_group)
-
-        auto_layout.addWidget(QLabel("Unthrottle lead time (seconds):"), 0, 0)
-        self.bes_auto_lead_spin = QDoubleSpinBox()
-        self.bes_auto_lead_spin.setRange(0.0, 15.0)
-        self.bes_auto_lead_spin.setSingleStep(0.5)
-        self.bes_auto_lead_spin.setDecimals(1)
-        self.bes_auto_lead_spin.setValue(3.0)
-        auto_layout.addWidget(self.bes_auto_lead_spin, 0, 1)
-
-        auto_layout.addWidget(QLabel("Post-action grace (seconds):"), 1, 0)
-        self.bes_auto_grace_spin = QDoubleSpinBox()
-        self.bes_auto_grace_spin.setRange(0.0, 10.0)
-        self.bes_auto_grace_spin.setSingleStep(0.25)
-        self.bes_auto_grace_spin.setDecimals(2)
-        self.bes_auto_grace_spin.setValue(1.0)
-        auto_layout.addWidget(self.bes_auto_grace_spin, 1, 1)
-
-        hint = QLabel("Auto Action temporarily disables throttling before it starts clicking/typing.")
-        hint.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        auto_layout.addWidget(hint, 2, 0, 1, 2)
-
-        layout.addWidget(auto_group)
-
-        log_group = QGroupBox("BES Log")
-        log_layout = QVBoxLayout(log_group)
-        self.bes_log_box = QTextEdit()
-        self.bes_log_box.setReadOnly(True)
-        self.bes_log_box.setFont(QFont("Consolas", 10))
-        self.bes_log_box.setMinimumHeight(180)
-        try:
-            self.bes_log_box.document().setMaximumBlockCount(5000)
-        except Exception:
-            pass
-        log_layout.addWidget(self.bes_log_box)
-        layout.addWidget(log_group)
-
-        footer = QHBoxLayout()
-        footer.addStretch()
-        reset_btn = QPushButton("Restore BES Defaults")
-        reset_btn.clicked.connect(self._reset_bes_to_defaults)
-        footer.addWidget(reset_btn)
-        layout.addLayout(footer)
-
-        layout.addStretch(1)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(bes_widget)
-        self.tab_widget.addTab(scroll, "BES")
-
-        # Debounced persistence (avoid writing settings.json on slider drag)
-        self._bes_save_timer = QTimer(self)
-        self._bes_save_timer.setSingleShot(True)
-        self._bes_save_timer.timeout.connect(self._save_bes_settings)
-
-        # Periodic enforcement loop
-        self._bes_tick_timer = QTimer(self)
-        self._bes_tick_timer.timeout.connect(self._bes_tick)
-        self._bes_tick_timer.setInterval(1000)
-
-        # Wire change events
-        self.bes_enable_chk.toggled.connect(self._on_bes_enabled_toggled)
-        self.bes_cycle_spin.valueChanged.connect(self._on_bes_ui_changed)
-        self.bes_mode_combo.currentIndexChanged.connect(self._on_bes_mode_changed)
-        self.bes_smart_count_spin.valueChanged.connect(self._on_bes_ui_changed)
-        self.bes_menu_slider.valueChanged.connect(self._on_bes_slider_changed)
-        self.bes_game_slider.valueChanged.connect(self._on_bes_slider_changed)
-        self.bes_auto_lead_spin.valueChanged.connect(self._on_bes_ui_changed)
-        self.bes_auto_grace_spin.valueChanged.connect(self._on_bes_ui_changed)
-        for combo in self.bes_exempt_combos:
-            combo.currentIndexChanged.connect(self._on_bes_ui_changed)
-
-        # Populate + load persisted settings
-        self._bes_refresh_user_list()
-        self._load_bes_settings()
 
     def _on_bes_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -22784,7 +17186,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
     def _on_bes_enabled_toggled(self, enabled: bool) -> None:
         if self.bes_controller is None:
-            self._bes_update_status("Status: Unsupported", warning=True)
+            self._bes_update_status("Not available on this PC", warning=True)
             return
 
         enabled = bool(enabled)
@@ -22812,7 +17214,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                     self._bes_tick_timer.stop()
             except Exception:
                 pass
-            self._bes_update_status("Status: Disabled")
+            self._bes_update_status("Off")
 
         try:
             with self._bes_cfg_lock:
@@ -23356,7 +17758,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         try:
             import psutil  # local import to keep GUI import surface small
         except Exception:
-            self._bes_update_status("Status: Missing psutil", warning=True)
+            self._bes_update_status("Not available: the psutil library is missing", warning=True)
             return
 
         cfg = self._get_bes_settings_from_ui()
@@ -23479,7 +17881,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             mode_value = str(snap.get("mode", throttle_mode) or throttle_mode)
             mode_label = "Smart" if mode_value == "smart" else "All threads"
             smart_value = int(snap.get("smart_threads", smart_thread_count) or smart_thread_count)
-            smart_suffix = f" - SmartThreads={smart_value}" if mode_value == "smart" else ""
+            smart_suffix = f", {smart_value} threads each" if mode_value == "smart" else ""
             holds = int(snap.get("holds", 0) or 0)
             hold_entries = int(snap.get("hold_entries", holds) or 0)
             effective_cycle = int(snap.get("effective_cycle_ms", cycle_ms) or cycle_ms)
@@ -23488,21 +17890,19 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             resume_failures = int(snap.get("resume_failures", 0) or 0)
             sample_failures = int(snap.get("smart_sample_failures", 0) or 0)
             thread_errors = open_failures + suspend_failures + resume_failures + sample_failures
+            extra = [f"{awaiting_logs} waiting for their username"] if awaiting_logs else []
+            if holds:
+                extra.append(f"{holds} lifted for Anti-AFK or actions")
+            if thread_errors:
+                extra.append(f"{thread_errors} thread errors (open {open_failures}, suspend {suspend_failures}, "
+                             f"resume {resume_failures}, sample {sample_failures})")
             self._bes_update_status(
-                "Status: Running"
-                f" - Mode={mode_label}{smart_suffix}"
-                f" - TrackedPIDs={len(tracked_pids)}"
-                f" - LivePIDs={len(targets)}"
-                f" - ThrottledPIDs={throttled}"
-                f" - AwaitingLogs={awaiting_logs}"
-                f" - Holds={holds}/{hold_entries}"
-                f" - Cycle={effective_cycle}ms"
-                f" - ThreadErrors={thread_errors}"
-                f" (open={open_failures}, suspend={suspend_failures}, resume={resume_failures}, sample={sample_failures})",
+                f"Limiting {throttled} of {len(targets)} Roblox windows ({mode_label.lower()}{smart_suffix}, "
+                f"every {effective_cycle} ms)" + ("; " + "; ".join(extra) if extra else ""),
                 warning=thread_errors > 0,
             )
         except Exception:
-            self._bes_update_status("Status: Error", warning=True)
+            self._bes_update_status("Stopped after an error; see the activity log", warning=True)
 
     def _ocr_empty_roi_cfg(self) -> dict:
         return {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
@@ -24196,29 +18596,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self.ocr_filter_table.setCellWidget(row, 5, self._ocr_wrap_table_cell(tol_sb, center=True))
 
         settings_btn = QPushButton("Edit")
-        settings_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background-color: {ModernStyle.PRIMARY};
-                color: {ModernStyle.TEXT_PRIMARY};
-                border: none;
-                padding: 8px 16px;
-                border-radius: 6px;
-                font-weight: 500;
-                min-width: 80px;
-                min-height: 28px;
-            }}
-
-            QPushButton:hover {{
-                background-color: {ModernStyle.PRIMARY_VARIANT};
-            }}
-
-            QPushButton:disabled {{
-                background-color: {ModernStyle.SURFACE_VARIANT};
-                color: {ModernStyle.TEXT_SECONDARY};
-            }}
-            """
-        )
+        settings_btn.setProperty("size", "sm")
         settings_btn.clicked.connect(lambda _checked=False, btn=settings_btn: self._open_ocr_filter_settings_dialog(btn))
         self._set_ocr_filter_button_meta(settings_btn, spec)
         settings_btn.setToolTip(self._ocr_filter_assignment_summary(spec))
@@ -25354,21 +19732,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         if self._is_manager_running() and self.ocr_enable_chk.isChecked():
             self._start_ocr_worker()
 
-    def _update_ocr_roi_label(self):
-        if self.ocr_roi:
-            x, y, w, h = self.ocr_roi
-            self.ocr_roi_label.setText(f"Chat ROI: x={x:.3f}, y={y:.3f}, w={w:.3f}, h={h:.3f}")
-        else:
-            self.ocr_roi_label.setText("Chat ROI: not calibrated")
-
-    def _update_ocr_device_label(self):
-        """Update the OCR device label with current OCR runtime status."""
-        try:
-            summary = get_ocr_device_summary()
-        except Exception:
-            summary = "Unknown (error checking OCR device)"
-        self.ocr_device_label.setText(f"OCR Device: {summary}")
-
     def _load_ocr_device_choices(self) -> None:
         if not hasattr(self, "ocr_device_combo"):
             return
@@ -25426,7 +19789,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             return
         if checked:
             if not self._is_manager_running():
-                QMessageBox.information(self, "Manager not running", "OCR will start once the manager is running.")
+                QMessageBox.information(self, "Manager not running", "Chat reading starts when the manager starts.")
                 return
             self._start_ocr_worker()
         else:
@@ -25720,14 +20083,15 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             ms["merchant_webhook"] = self.ms_merchant_webhook_input.text().strip()
         if hasattr(self, "ms_player_tracker_input"):
             ms["player_tracker_webhook"] = self.ms_player_tracker_input.text().strip()
+        if hasattr(self, "ms_sinister_webhook_input"):
+            ms["sinister_webhook"] = self.ms_sinister_webhook_input.text().strip()
         if hasattr(self, "ms_enable_jester"):
             ms["enable_jester"] = bool(self.ms_enable_jester.isChecked())
         if hasattr(self, "ms_enable_mari"):
             ms["enable_mari"] = bool(self.ms_enable_mari.isChecked())
         if hasattr(self, "ms_enable_rin"):
             ms["enable_rin"] = bool(self.ms_enable_rin.isChecked())
-        if hasattr(self, "ms_merchant_detection_mode"):
-            ms["merchant_detection_mode"] = str(self.ms_merchant_detection_mode.currentData() or "asset_id")
+        ms.pop("merchant_detection_mode", None)  # asset id is the only detection mode
         if hasattr(self, "ms_jester_type") and hasattr(self, "ms_jester_id"):
             ms["jester_ping_type"] = self.ms_jester_type.currentText()
             ms["jester_ping_id"] = self.ms_jester_id.text().strip()
@@ -25784,9 +20148,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 # Persist new ROI + live-apply
                 self._on_ocr_settings_changed()
 
-    def calibrate_ocr_verification_roi(self):
-        QMessageBox.information(self, "OCR Filters", "Verification areas are now configured from each filter's Edit popup.")
-
     def show_ocr_preview(self):
         """
         Capture the calibrated chat area from a Roblox window and show what the
@@ -25794,7 +20155,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         panel so users can debug missing dependencies or GPU issues.
         """
         if not self.ocr_roi:
-            QMessageBox.warning(self, "Calibrate OCR", "Please calibrate the chat area first (Test preview uses chat ROI only).")
+            QMessageBox.warning(self, "Chat area", "Set the chat area first.")
             return
         windows = enum_roblox_windows()
         if not windows:
@@ -25843,16 +20204,13 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 f"An unexpected error occurred while generating the OCR preview:\n{e}",
             )
 
-    def show_ocr_verification_preview(self):
-        QMessageBox.information(self, "OCR Filters", "Verification previews are now available from each filter's Edit popup.")
-
     def test_ocr_frame_compare(self):
         """
         Capture the OCR frame twice (click multiple times) and report how similar
         it is to the previous capture using the current tolerance setting.
         """
         if not self.ocr_roi:
-            QMessageBox.warning(self, "Calibrate OCR", "Please calibrate the chat area first (frame compare uses chat ROI only).")
+            QMessageBox.warning(self, "Chat area", "Set the chat area first.")
             return
 
         windows = enum_roblox_windows()
@@ -25886,7 +20244,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         if self._ocr_test_last_hash is None:
             self._ocr_test_last_hash = current_hash
-            msg = f"[Frame Compare] Baseline captured for PID {win.pid}. Click again to compare."
+            msg = "First capture saved. Press Compare chat again to compare."
             try:
                 self._handle_ocr_log(msg)
             except Exception:
@@ -25898,8 +20256,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         skip = diff_pct <= tol
         self._ocr_test_last_hash = current_hash
 
-        verdict = "SKIP OCR" if skip else "RUN OCR"
-        msg = f"[Frame Compare] PID {win.pid}: diff={diff_pct:.2f}% (tol={tol:.0f}%) -> {verdict}"
+        verdict = "The read would be skipped" if skip else "The read would run"
+        msg = f"[Chat] Compare: {diff_pct:.2f}% changed (skip at {tol:.0f}% or less). {verdict}."
         try:
             self._handle_ocr_log(msg)
         except Exception:
@@ -25908,7 +20266,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         QMessageBox.information(
             self,
             "Frame Compare",
-            f"Window: {win.title}\nPID: {win.pid}\nDiff: {diff_pct:.2f}%\nTolerance: {tol:.0f}%\nResult: {verdict}",
+            f"{win.title}\n\nChanged: {diff_pct:.2f}%\nSkipped at: {tol:.0f}% or less\n\n{verdict}.",
         )
 
     def _resolve_pid_context(self, pid: int) -> Dict[str, Any]:
@@ -26075,6 +20433,11 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         if not uid:
             return
 
+        if not hasattr(self, "_currently_solving"):
+            self._currently_solving = set()
+        if uid in self._currently_solving:
+            return
+
         wt = self.worker_thread
         info: Dict[str, Any] = {}
         try:
@@ -26094,61 +20457,277 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         if bool(info.get("cap", False)):
             return
 
-        self.add_log(f"[CAP] {username} flagged by verification check (Start Puzzle).")
+        # No auto-solving possible when the account opted out (solver_enabled
+        # False) OR no global captcha-solver API key is set. In both cases don't
+        # burn silent relaunch attempts on a solver that can't run — mark CAP and
+        # close now so the account is actually flagged in the list.
+        _captcha_cfg = self.config_manager.load_settings().get("captcha_solver", {}) or {}
+        _api_key_set = bool(str(_captcha_cfg.get("api_key", "") or "").strip())
+        _solver_on = bool(info.get("solver_enabled", True))
+        if not _solver_on or not _api_key_set:
+            _reason = ("Auto-solver disabled for this account"
+                       if not _solver_on else "no captcha-solver API key set")
+            self.add_log(f"[CAP] {username} flagged (Start Puzzle). {_reason} - marking CAP and closing game.")
+            try:
+                self.config_manager.mark_cap_flag(uid, True)
+            except Exception:
+                pass
+            try:
+                if wt and wt.manager:
+                    live_info = wt.manager.settings.get(uid, {}) or {}
+                    live_info["cap"] = True
+                    st = wt.user_states.get(uid, {})
+                    if isinstance(st, dict):
+                        st_info = st.get("user_info")
+                        if isinstance(st_info, dict):
+                            st_info["cap"] = True
+                        st["requires_restart"] = False
+                        st["status"] = "CAP"
+                    wt.active_pool.discard(uid)
+                    wt.spare_pool.discard(uid)
+                    self._queue_worker_action("kill_user_processes", uid)
+            except Exception:
+                pass
+            return
+
+        if not hasattr(self, "_captcha_attempts"):
+            self._captcha_attempts = {}
+        attempts = self._captcha_attempts.get(uid, 0) + 1
+        self._captcha_attempts[uid] = attempts
+
+        if attempts >= 3:
+            self.add_log(f"[CAP] {username} failed to bypass captcha after 3 consecutive attempts. Marking CAP and closing game.")
+            try:
+                self.config_manager.mark_cap_flag(uid, True)
+            except Exception:
+                pass
+
+            try:
+                if wt and wt.manager:
+                    live_info = wt.manager.settings.get(uid, {}) or {}
+                    live_info["cap"] = True
+                    st = wt.user_states.get(uid, {})
+                    if isinstance(st, dict):
+                        st_info = st.get("user_info")
+                        if isinstance(st_info, dict):
+                            st_info["cap"] = True
+                        st["requires_restart"] = False
+                        st["status"] = "CAP"
+                    wt.active_pool.discard(uid)
+                    wt.spare_pool.discard(uid)
+                    self._queue_worker_action("kill_user_processes", uid)
+            except Exception:
+                pass
+            self._captcha_attempts[uid] = 0
+            return
+
+        self.add_log(f"[CAP] {username} flagged by verification check (Start Puzzle). Attempt {attempts}/3. Running captcha solver in background...")
+        self._currently_solving.add(uid)
+        if wt:
+            if not hasattr(wt, "_currently_solving_uids"):
+                wt._currently_solving_uids = set()
+            wt._currently_solving_uids.add(uid)
+
         try:
-            self.config_manager.mark_cap_flag(uid, True)
+            self._queue_worker_action("kill_user_processes", uid)
         except Exception:
             pass
 
-        try:
-            if wt and wt.manager:
-                live_info = wt.manager.settings.get(uid, {}) or {}
-                live_info["cap"] = True
-                st = wt.user_states.get(uid, {})
-                if isinstance(st, dict):
-                    st_info = st.get("user_info")
-                    if isinstance(st_info, dict):
-                        st_info["cap"] = True
-                    st["requires_restart"] = False
-                    st["status"] = "CAP"
-                wt.active_pool.discard(uid)
-                wt.spare_pool.discard(uid)
-                self._queue_worker_action("kill_user_processes", uid)
-        except Exception:
-            pass
+        # Trigger Auto-Solver
+        cookie = info.get("cookie", "")
+        place_id = info.get("place", 15532962292) # fallback to default if missing
+        
+        captcha_cfg = self.config_manager.load_settings().get("captcha_solver", {}) or {}
+        api_key = captcha_cfg.get("api_key", "")
+        solver_type = captcha_cfg.get("provider", "YesCaptcha")
+        
+        # Queue the task for the sequential worker
+        task = {
+            "uid": uid,
+            "username": username,
+            "cookie": cookie,
+            "place_id": place_id,
+            "solver_type": solver_type,
+            "api_key": api_key,
+            "wt": wt
+        }
+        self._captcha_queue.put(task)
+        
+        # Start the worker thread if it's not running
+        with self._captcha_lock:
+            if self._captcha_worker_thread is None or not self._captcha_worker_thread.is_alive():
+                self._captcha_worker_thread = threading.Thread(target=self._captcha_worker_loop, daemon=True)
+                self._captcha_worker_thread.start()
 
-    def _handle_ocr_status(self, status: str):
-        status_upper = (status or "").strip().lower()
-        if status_upper == "running":
-            self.ocr_status_label.setText("Status: Running")
-            self.ocr_status_label.setStyleSheet(f"color:{ModernStyle.SECONDARY}; font-weight: bold;")
-            self._refresh_ocr_device_label()
-        else:
-            self._stop_ocr_filter_alert()
-            self.ocr_status_label.setText("Status: Stopped")
-            self.ocr_status_label.setStyleSheet(f"color:{ModernStyle.TEXT_SECONDARY}; font-weight: bold;")
 
-    def _make_launch_priority_spin(self, value: object) -> QSpinBox:
-        spin = _AutoItemSpinBox()
-        spin.setRange(MIN_LAUNCH_PRIORITY, MAX_LAUNCH_PRIORITY)
-        spin.setValue(coerce_launch_priority(value))
-        spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        spin.setToolTip("Higher numbers launch first. Range: -3 to +3. Accounts with the same priority keep this table order.")
-        try:
-            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
-        except Exception:
-            pass
-        spin.setMinimumWidth(96)
-        spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        return spin
+    def _captcha_worker_loop(self):
+        """Sequential worker to handle captchas one-by-one with Anti-AFK breathing room."""
+        import time
+        while True:
+            try:
+                task = self._captcha_queue.get(timeout=5)
+            except queue.Empty:
+                with self._captcha_lock:
+                    self._captcha_worker_thread = None
+                break
 
-    def _launch_priority_spin_at_row(self, table: QTableWidget, row: int) -> Optional[QSpinBox]:
-        editor = table.cellWidget(row, 2)
-        if isinstance(editor, QSpinBox):
-            return editor
-        if isinstance(editor, QWidget):
-            return editor.findChild(QSpinBox)
-        return None
+            uid = task["uid"]
+            username = task["username"]
+            cookie = task["cookie"]
+            place_id = task["place_id"]
+            solver_type = task["solver_type"]
+            api_key = task["api_key"]
+            wt = task["wt"]
+
+            if not cookie:
+                self.add_log(f"[-] Captcha Solver skipped for {username}: no cookie available.")
+                try:
+                    self._captcha_queue.task_done()
+                except Exception:
+                    pass
+                if hasattr(self, "_currently_solving"):
+                    self._currently_solving.discard(uid)
+                if wt and hasattr(wt, "_currently_solving_uids"):
+                    wt._currently_solving_uids.discard(uid)
+                continue
+
+            if not api_key:
+                self.add_log(f"[-] Captcha Solver skipped for {username}: no API key configured. Set one in Settings → Captcha Solver API.")
+                try:
+                    self._captcha_queue.task_done()
+                except Exception:
+                    pass
+                if hasattr(self, "_currently_solving"):
+                    self._currently_solving.discard(uid)
+                if wt and hasattr(wt, "_currently_solving_uids"):
+                    wt._currently_solving_uids.discard(uid)
+                continue
+
+            if self.antiafk and self.antiafk.antiafk_running:
+                self.add_log(f"[*] Pausing Anti-AFK to solve Captcha for {username}...")
+                self.antiafk.pause_antiafk(wait=True)
+
+            self.add_log(f"[*] Starting Captcha Solver for {username}...")
+            solve_success = False
+            join_url = None
+
+            try:
+                from captcha import RobloxCaptchaSolver
+                # Give the process a moment to die
+                time.sleep(1)
+
+                solver = RobloxCaptchaSolver(solver_type, api_key)
+                try:
+                    pid = int(place_id)
+                except Exception:
+                    pid = 15532962292
+
+                res = solver.solve(cookie, pid)
+                if isinstance(res, tuple) and len(res) == 3:
+                    success, msg, join_url = res
+                else:
+                    success, msg = res[0], res[1]
+
+                if success:
+                    solve_success = True
+                    self.add_log(f"[+] Captcha successfully bypassed for {username}!")
+                    self.config_manager.mark_cap_flag(uid, False)
+                    if hasattr(self, "_captcha_attempts"):
+                        self._captcha_attempts[uid] = 0
+                    if wt and wt.manager:
+                        live_info = wt.manager.settings.get(uid, {})
+                        if isinstance(live_info, dict): live_info["cap"] = False
+                        st = wt.user_states.get(uid, {})
+                        if isinstance(st, dict):
+                            st_info = st.get("user_info", {})
+                            if isinstance(st_info, dict): st_info["cap"] = False
+                else:
+                    self.add_log(f"[-] Captcha Bypass Failed for {username}: {msg}")
+                    self.add_log(f"[*] Clearing CAP status and relaunching {username} anyway...")
+                    self.config_manager.mark_cap_flag(uid, False)
+                    if hasattr(self, "_captcha_attempts"):
+                        self._captcha_attempts[uid] = 0
+                    if wt and wt.manager:
+                        live_info = wt.manager.settings.get(uid, {})
+                        if isinstance(live_info, dict): live_info["cap"] = False
+                        st = wt.user_states.get(uid, {})
+                        if isinstance(st, dict):
+                            st_info = st.get("user_info", {})
+                            if isinstance(st_info, dict): st_info["cap"] = False
+                    solve_success = True
+            except ImportError:
+                self.add_log(f"[-] Captcha Solver Error for {username}: 'captcha' module not found. Make sure captcha.py is in the project directory.")
+            except Exception as e:
+                self.add_log(f"[-] Captcha Solver Error for {username}: {e}")
+            finally:
+                if hasattr(self, "_currently_solving"):
+                    self._currently_solving.discard(uid)
+                if wt and hasattr(wt, "_currently_solving_uids"):
+                    wt._currently_solving_uids.discard(uid)
+                if solve_success:
+                    try:
+                        # ConfigManager owns the alert helpers (the GUI has no such method).
+                        self.config_manager._send_cap_solved_alert_webhook(uid, username)
+                    except Exception:
+                        pass
+
+                if self.antiafk:
+                    self.add_log(f"[+] Solver finished for {username}. Resuming Anti-AFK...")
+                    self.antiafk.resume_antiafk()
+
+                self.add_log(f"[TASK COMPLETE] Captcha solver finished for {username}.")
+                if solve_success and wt:
+                    # Give the thread-safe discard in 'finally' a tiny split second to execute
+                    if hasattr(wt, "_currently_solving_uids"):
+                        wt._currently_solving_uids.discard(uid)
+                    time.sleep(1)
+                    try:
+                        self.add_log(f"[*] Relaunching {username} after captcha solve...")
+
+                        # Re-add to active_pool so the manager tracks this account again.
+                        try:
+                            wt.active_pool.add(uid)
+                            wt.spare_pool.discard(uid)  # ensure not in both pools
+                        except Exception:
+                            pass
+
+                        # Reset state flags so the manager doesn't immediately re-flag it.
+                        try:
+                            st = wt.user_states.get(uid, {})
+                            if isinstance(st, dict):
+                                st["requires_restart"] = False
+                                st["skip_reconnect_on_disconnect"] = False
+                                st["inactive_since"] = None
+                                st["status"] = "Restarting"
+                        except Exception:
+                            pass
+
+                        # Fire the restart through the worker action queue (thread-safe).
+                        if join_url:
+                            ok = self._queue_worker_action("restart_user_session", uid, join_script_url=join_url)
+                        else:
+                            ok = self._queue_worker_action("restart_user_session", uid)
+                        if ok:
+                            self.add_log(f"[+] {username} relaunch queued successfully after captcha solve.")
+                        else:
+                            self.add_log(f"[!] {username} relaunch queue returned False, main loop will retry.")
+                    except Exception as e:
+                        self.add_log(f"[!] {username} relaunch error: {e}")
+
+                if not self._captcha_queue.empty():
+                    try:
+                        interval_s = int(
+                            (self.antiafk.config if self.antiafk else {}).get("antiafk_interval", 120)
+                        )
+                    except Exception:
+                        interval_s = 120
+                    self.add_log(
+                        f"[*] {self._captcha_queue.qsize()} captcha(s) pending. "
+                        f"Waiting {interval_s}s for Anti-AFK cycle before next solve..."
+                    )
+                    time.sleep(interval_s)
+
+                self._captcha_queue.task_done()
 
     def _launch_priority_status_segments(self, info: dict) -> List[str]:
         if not isinstance(info, dict):
@@ -26165,107 +20744,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         if bool(info.get("alternate_launch", False)):
             flags.append("Alternate")
         return flags
-
-    def _populate_launch_priority_table(self, users_config: Optional[dict] = None) -> None:
-        table = getattr(self, "launch_priority_table", None)
-        if table is None:
-            return
-        current_priorities = self._collect_launch_priorities_from_ui()
-        if not isinstance(users_config, dict):
-            try:
-                users_config = self.config_manager.load_users() or {}
-            except Exception:
-                users_config = {}
-        if not isinstance(users_config, dict):
-            users_config = {}
-
-        query = ""
-        try:
-            query = str(self.launch_priority_search_input.text() or "").strip().lower()
-        except Exception:
-            query = ""
-
-        rows = [
-            (str(uid), info)
-            for uid, info in (users_config or {}).items()
-            if isinstance(info, dict)
-            and (
-                not query
-                or query in str(uid).lower()
-                or query in str(info.get("username", f"User_{uid}") or "").lower()
-            )
-        ]
-        for uid, info in rows:
-            if uid in current_priorities:
-                info["launch_priority"] = current_priorities[uid]
-        rows = sort_user_items_by_launch_priority(rows)
-
-        try:
-            table.setUpdatesEnabled(False)
-        except Exception:
-            pass
-        table.setRowCount(len(rows))
-        for row, (uid, info) in enumerate(rows):
-            uid_item = QTableWidgetItem(uid)
-            uid_item.setData(Qt.ItemDataRole.UserRole, uid)
-            username_item = QTableWidgetItem(str(info.get("username", f"User_{uid}") or f"User_{uid}"))
-            status_segments = self._launch_priority_status_segments(info)
-            status_item = QTableWidgetItem(" / ".join(status_segments))
-            status_item.setData(_LAUNCH_PRIORITY_STATUS_ROLE, status_segments)
-            priority_spin = self._make_launch_priority_spin(info.get("launch_priority", DEFAULT_LAUNCH_PRIORITY))
-
-            for item in (uid_item, username_item, status_item):
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-
-            table.setItem(row, 0, uid_item)
-            table.setItem(row, 1, username_item)
-            table.setCellWidget(row, 2, priority_spin)
-            table.setItem(row, 3, status_item)
-            try:
-                table.setRowHeight(row, 44)
-            except Exception:
-                pass
-
-        try:
-            table.setUpdatesEnabled(True)
-        except Exception:
-            pass
-
-    def _collect_launch_priorities_from_ui(self) -> dict:
-        try:
-            users_config = self.config_manager.load_users() or {}
-        except Exception:
-            users_config = {}
-        priorities = {
-            str(uid): coerce_launch_priority(info.get("launch_priority", DEFAULT_LAUNCH_PRIORITY))
-            for uid, info in (users_config or {}).items()
-            if isinstance(info, dict)
-        }
-        table = getattr(self, "launch_priority_table", None)
-        if table is None:
-            return priorities
-        for row in range(table.rowCount()):
-            item = table.item(row, 0)
-            if item is None:
-                continue
-            uid = str(item.data(Qt.ItemDataRole.UserRole) or item.text() or "").strip()
-            if not uid:
-                continue
-            spin = self._launch_priority_spin_at_row(table, row)
-            if isinstance(spin, QSpinBox):
-                priorities[uid] = coerce_launch_priority(spin.value())
-            else:
-                priorities[uid] = DEFAULT_LAUNCH_PRIORITY
-        return priorities
-
-    def _reset_launch_priorities_ui(self) -> None:
-        table = getattr(self, "launch_priority_table", None)
-        if table is None:
-            return
-        for row in range(table.rowCount()):
-            spin = self._launch_priority_spin_at_row(table, row)
-            if isinstance(spin, QSpinBox):
-                spin.setValue(DEFAULT_LAUNCH_PRIORITY)
 
     def _save_launch_priorities_from_ui(self) -> bool:
         priorities = self._collect_launch_priorities_from_ui()
@@ -26325,1467 +20803,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             pass
         return True
 
-    def setup_settings_tab(self):
-        settings_widget = QWidget()
-        layout = QVBoxLayout(settings_widget)
-
-        scroll_area = QScrollArea(); scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-        content_widget = QWidget(); content_layout = QVBoxLayout(content_widget)
-
-        # ── Basic ────────────────────────────────────────────────────────────────
-        basic_group = QGroupBox("Basic Settings"); basic_layout = QFormLayout(basic_group)
-        self.settings_window_limit_input = QSpinBox(); self.settings_window_limit_input.setRange(1, 999)
-        self.settings_window_limit_input.setToolTip("Maximum windows per Roblox process")
-        basic_layout.addRow("Window Limit:", self.settings_window_limit_input)
-
-        self.spares_mode_chk = QCheckBox("Use Spare Accounts (launch ~half)")
-        self.spares_mode_chk.setToolTip("When enabled, only ~half of good accounts are launched initially. Others act as spares for pre-join handoffs.")
-        basic_layout.addRow("Spares Mode:", self.spares_mode_chk)
-        
-        # NEW:
-        self.spares_split_cmb = QComboBox()
-        self.spares_split_cmb.addItems(["1/2", "3/4", "4/5"])
-        self.spares_split_cmb.setToolTip("When spare mode is ON: what fraction of good accounts to launch as active.")
-        self.spares_split_cmb.setEnabled(self.spares_mode_chk.isChecked())
-        self.spares_mode_chk.toggled.connect(self.spares_split_cmb.setEnabled)
-        basic_layout.addRow("Spare Mode Split:", self.spares_split_cmb)
-        content_layout.addWidget(basic_group)
-
-        # ── Timing ───────────────────────────────────────────────────────────────
-        # Roblox Window Geometry
-        win_geom_group = QGroupBox("Set Roblox Window Geometry")
-        win_geom_layout = QVBoxLayout(win_geom_group)
-
-        self.rbwin_geom_enforce_chk = QCheckBox("Auto-fix Roblox window size/position on launch")
-        self.rbwin_geom_enforce_chk.setToolTip(
-            "When enabled, each Roblox window launched by M.J.JARAM is checked for the recorded geometry.\n"
-            "If moving/resizing fails, it automatically retries once after 5 seconds."
-        )
-        win_geom_layout.addWidget(self.rbwin_geom_enforce_chk)
-
-        record_row = QHBoxLayout()
-        self.rbwin_geom_record_btn = QPushButton("Record an open Roblox window")
-        self.rbwin_geom_record_btn.setToolTip(
-            "Records the size and position of an open Roblox window.\n"
-            "Tip: focus the Roblox window you want to record, then click this button."
-        )
-        self.rbwin_geom_record_btn.clicked.connect(self._record_roblox_window_geometry)
-        record_row.addWidget(self.rbwin_geom_record_btn)
-        record_row.addStretch()
-        win_geom_layout.addLayout(record_row)
-
-        self.rbwin_geom_status_lbl = QLabel("Recorded: none")
-        self.rbwin_geom_status_lbl.setWordWrap(True)
-        self.rbwin_geom_status_lbl.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        win_geom_layout.addWidget(self.rbwin_geom_status_lbl)
-
-        content_layout.addWidget(win_geom_group)
-
-        # ── Roblox Resizer (optimize GPU/CPU/RAM) ────────────────────────────────
-        resizer_group = QGroupBox("Roblox Resizer (optimize)")
-        resizer_layout = QFormLayout(resizer_group)
-        self.resizer_enable_chk = QCheckBox("Shrink all Roblox windows to save GPU / CPU / RAM")
-        self.resizer_enable_chk.setToolTip(
-            "Continuously resizes every Roblox window to the pixel size below.\n"
-            "Bypasses Roblox's minimum-size clamp so it truly renders tiny -> large\n"
-            "GPU/CPU/RAM savings. Detection is log-based, so tiny windows are fine."
-        )
-        resizer_layout.addRow(self.resizer_enable_chk)
-        self.resizer_width_input = QSpinBox(); self.resizer_width_input.setRange(1, 4096); self.resizer_width_input.setSuffix(" px")
-        self.resizer_width_input.setToolTip("Render width. Smaller = less GPU/CPU/RAM.")
-        resizer_layout.addRow("Width:", self.resizer_width_input)
-        self.resizer_height_input = QSpinBox(); self.resizer_height_input.setRange(1, 4096); self.resizer_height_input.setSuffix(" px")
-        self.resizer_height_input.setToolTip("Render height. Smaller = less GPU/CPU/RAM.")
-        resizer_layout.addRow("Height:", self.resizer_height_input)
-        self.resizer_enable_chk.toggled.connect(self._on_resizer_settings_changed)
-        self.resizer_width_input.valueChanged.connect(self._on_resizer_settings_changed)
-        self.resizer_height_input.valueChanged.connect(self._on_resizer_settings_changed)
-        content_layout.addWidget(resizer_group)
-
-        timing_group = QGroupBox("Timing Settings"); timing_layout = QFormLayout(timing_group)
-        self.settings_offline_threshold_input = QSpinBox(); self.settings_offline_threshold_input.setRange(10, 120); self.settings_offline_threshold_input.setSuffix(" s")
-        timing_layout.addRow("Restart Inactive After:", self.settings_offline_threshold_input)
-
-        self.settings_initial_delay_input = QSpinBox(); self.settings_initial_delay_input.setRange(5, 999999); self.settings_initial_delay_input.setSuffix(" s")
-        timing_layout.addRow("Initial Launch Delay:", self.settings_initial_delay_input)
-
-        self.settings_launch_delay_input = QSpinBox(); self.settings_launch_delay_input.setRange(1, 999999); self.settings_launch_delay_input.setSuffix(" s")
-        timing_layout.addRow("Launch Delay:", self.settings_launch_delay_input)
-
-        self.handoff_lead_input = QSpinBox(); self.handoff_lead_input.setRange(5, 300); self.handoff_lead_input.setSuffix(" s")
-        timing_layout.addRow("Handoff Lead (pre-join before kill):", self.handoff_lead_input)
-
-        self.early_join_window_input = QSpinBox(); self.early_join_window_input.setRange(10, 600); self.early_join_window_input.setSuffix(" s")
-        self.early_join_window_input.setToolTip("Assign spares early for sessions expiring within this window to avoid backlog spikes.")
-        timing_layout.addRow("Early-Join Window:", self.early_join_window_input)
-        content_layout.addWidget(timing_group)
-
-        # ── Shutdown / Timeout ───────────────────────────────────────────────────
-        timeout_group = QGroupBox("Shutdown Settings"); timeout_layout = QFormLayout(timeout_group)
-        self.settings_strap_threshold_input = QSpinBox(); self.settings_strap_threshold_input.setRange(1, 200)
-        self.settings_strap_threshold_input.setToolTip("Max number of strap.exe helpers before trimming")
-        timeout_layout.addRow("-Strap Limit:", self.settings_strap_threshold_input)
-        
-        self.kill_after_enable_chk = QCheckBox("Enable Kill After (auto-close)")
-        self.kill_after_enable_chk.setChecked(False)
-        timeout_layout.addRow("Enable:", self.kill_after_enable_chk)
-
-        # Optional: gray out the timeout field when disabled
-        def _toggle_kill_inputs(checked: bool):
-            self.kill_timeout_input.setEnabled(checked)
-        self.kill_after_enable_chk.toggled.connect(_toggle_kill_inputs)
-
-        self.kill_timeout_input = QSpinBox(); self.kill_timeout_input.setRange(60, 2_147_483_647); self.kill_timeout_input.setSuffix(" s")
-        self.kill_timeout_input.setToolTip("Time until window auto-closes")
-        timeout_layout.addRow("Kill After:", self.kill_timeout_input)
-
-        self.poll_interval_input = QSpinBox(); self.poll_interval_input.setRange(1, 120); self.poll_interval_input.setSuffix(" s")
-        self.poll_interval_input.setToolTip("How often the window timer for kill after is checked")
-        timeout_layout.addRow("Poll Interval:", self.poll_interval_input)
-        content_layout.addWidget(timeout_group)
-
-        cap_watchdog_group = QGroupBox("CAP Watchdog Settings")
-        cap_watchdog_layout = QFormLayout(cap_watchdog_group)
-
-        self.missing_username_cap_count_chk = QCheckBox("Increase CAP counter")
-        self.missing_username_cap_count_chk.setToolTip(
-            "When disabled, a missing username still causes the Roblox process to be killed and recycled, "
-            "but the account's CAP counter is not increased."
-        )
-        cap_watchdog_layout.addRow("No Username in Logs:", self.missing_username_cap_count_chk)
-
-        self.missing_username_timeout_input = QSpinBox()
-        self.missing_username_timeout_input.setRange(1, 86_400)
-        self.missing_username_timeout_input.setSuffix(" s")
-        self.missing_username_timeout_input.setToolTip(
-            "Healthy log-reader time to wait for the account username before killing and recycling its process."
-        )
-        cap_watchdog_layout.addRow("No-Username Timeout:", self.missing_username_timeout_input)
-
-        self.in_menu_none_cap_count_chk = QCheckBox("Increase CAP counter")
-        self.in_menu_none_cap_count_chk.setToolTip(
-            "When disabled, an unknown in-menu state still causes the Roblox process to be killed and recycled, "
-            "but the account's CAP counter is not increased."
-        )
-        cap_watchdog_layout.addRow("In-Menu None:", self.in_menu_none_cap_count_chk)
-
-        self.in_menu_none_timeout_input = QSpinBox()
-        self.in_menu_none_timeout_input.setRange(1, 86_400)
-        self.in_menu_none_timeout_input.setSuffix(" s")
-        self.in_menu_none_timeout_input.setToolTip(
-            "Time to wait after the in-menu-none watchdog becomes eligible before killing and recycling the process."
-        )
-        cap_watchdog_layout.addRow("In-Menu None Timeout:", self.in_menu_none_timeout_input)
-
-        self.cap_counter_limit_input = QSpinBox()
-        self.cap_counter_limit_input.setRange(1, 100)
-        self.cap_counter_limit_input.setToolTip(
-            "Number of counted watchdog timeouts required before an account is marked CAP."
-        )
-        cap_watchdog_layout.addRow("'Mark CAP At' Counter:", self.cap_counter_limit_input)
-        content_layout.addWidget(cap_watchdog_group)
-
-        # ── Alerts ────────────────────────────────────────────────────────────
-        alerts_group = QGroupBox("Alerts"); alerts_layout = QFormLayout(alerts_group)
-
-        self.webhook_input = QLineEdit(); self.webhook_input.setPlaceholderText("Discord webhook alert URL")
-        self.webhook_input.setToolTip("Discord webhook URL used for blackout, CAP, BAD, and hourly user-report alerts.")
-        alerts_layout.addRow("Webhook URL:", self.webhook_input)
-
-        self.blackout_ping_input = QLineEdit()
-        self.blackout_ping_input.setPlaceholderText("This message is sent whenever your active processes drop to 1 or less. Leave this empty if not interested")
-        self.blackout_ping_input.setToolTip("Sent when active Roblox processes drop to 1 or 0.")
-        alerts_layout.addRow("Blackout Ping:", self.blackout_ping_input)
-
-        self.cap_msg_input = QLineEdit()
-        self.cap_msg_input.setPlaceholderText("This message is sent whenever a user is marked for captcha. Leave this empty if not interested., Supports {username} and {uid}")
-        self.cap_msg_input.setToolTip("Sent when a user is marked CAP. Example Message: User {username} has disconnected, User ID = {uid}.")
-        alerts_layout.addRow("CAP Ping:", self.cap_msg_input)
-        self.cap_msg_input.setPlaceholderText("Sent when a user is marked CAP. Supports {username}, and {uid},")
-        self.cap_msg_input.setToolTip("Sent when a user is marked CAP. Example: User {username} has disconnected, User ID = {uid}.")
-
-        self.bad_msg_input = QLineEdit()
-        self.bad_msg_input.setPlaceholderText("This message is sent whenever a user is marked BAD. Leave this empty if not interested. - Supports {username} and {uid}")
-        self.bad_msg_input.setToolTip("Sent when a user is marked BAD. Example Message: User {username} has a bad cookie, User ID = {uid}.")
-        alerts_layout.addRow("BAD Ping:", self.bad_msg_input)
-        self.bad_msg_input.setPlaceholderText("Sent when a user is marked BAD. Supports {username}, and {uid},")
-        self.bad_msg_input.setToolTip("Sent when a user is marked BAD. Example: User {username} has a bad cookie, User ID = {uid}.")
-
-        self.hourly_users_report_chk = QCheckBox("")
-        self.hourly_users_report_chk.setToolTip(
-            "Send periodic webhook messages with total users and active users."
-        )
-        self.hourly_users_report_interval_spin = QSpinBox()
-        self.hourly_users_report_interval_spin.setRange(1, 168)
-        self.hourly_users_report_interval_spin.setSuffix(" h")
-        self.hourly_users_report_interval_spin.setToolTip("Hours between user-report messages.")
-        self.hourly_users_report_interval_spin.setValue(1)
-        self.hourly_users_report_interval_spin.setMinimumWidth(90)
-        self.hourly_users_report_interval_spin.setEnabled(False)
-
-        hourly_row_widget = QWidget()
-        hourly_row_layout = QHBoxLayout(hourly_row_widget)
-        hourly_row_layout.setContentsMargins(0, 0, 0, 0)
-        hourly_row_layout.setSpacing(8)
-        hourly_row_layout.addWidget(self.hourly_users_report_chk)
-        hourly_row_layout.addWidget(QLabel("Send users report every"))
-        hourly_row_layout.addWidget(self.hourly_users_report_interval_spin)
-        hourly_row_layout.addStretch()
-        alerts_layout.addRow("Users Report:", hourly_row_widget)
-        self.hourly_users_report_chk.toggled.connect(self.hourly_users_report_interval_spin.setEnabled)
-
-        content_layout.addWidget(alerts_group)
-
-        # --- Misc ---
-        misc_box = QGroupBox("Misc")
-        misc_layout = QFormLayout(misc_box)
-        self.ui_show_tutorial_menu_chk = QCheckBox("Show Tutorial in Help menu")
-        self.ui_show_tutorial_menu_chk.setToolTip("Enable to show Help → Tutorial in the menu bar.")
-        misc_layout.addRow(self.ui_show_tutorial_menu_chk)
-        self.ui_show_selected_sets_bes_exempt_slot1_chk = QCheckBox("Show Selected sets BES Exempt Slot 1")
-        self.ui_show_selected_sets_bes_exempt_slot1_chk.setToolTip(
-            "When enabled, Users → Show Selected also assigns that user to BES → Exempt Users → Slot 1.\n"
-            "Tip: Click “Save Settings” to persist this toggle."
-        )
-        misc_layout.addRow(self.ui_show_selected_sets_bes_exempt_slot1_chk)
-        self.misc_hide_discord_tabs_chk = QCheckBox("Hide Discord tab")
-        self.misc_hide_discord_tabs_chk.setToolTip(
-            "When enabled, the top-level Discord tab is hidden from the main tab bar."
-        )
-        self.misc_hide_discord_tabs_chk.setChecked(True)
-        misc_layout.addRow(self.misc_hide_discord_tabs_chk)
-        self.misc_skip_unknown_webhook_chk = QCheckBox("Skip webhooks if owner/PS unknown")
-        self.misc_skip_unknown_webhook_chk.setToolTip(
-            "When enabled, webhook messages are suppressed if the owner or private server is unknown."
-        )
-        misc_layout.addRow(self.misc_skip_unknown_webhook_chk)
-        self.misc_disable_log_merchants_when_ocr_active_chk = QCheckBox(
-            "Disable log merchant detection while OCR merchant filters are active"
-        )
-        self.misc_disable_log_merchants_when_ocr_active_chk.setToolTip(
-            "When enabled, MultiScope ignores merchant log lines whenever OCR is on and at least one OCR merchant filter is enabled."
-        )
-        misc_layout.addRow(self.misc_disable_log_merchants_when_ocr_active_chk)
-        self.misc_log_confirmed_launch_mode_chk = QCheckBox("Launch only after previous fully launched")
-        self.misc_log_confirmed_launch_mode_chk.setToolTip(
-            "When enabled, launch delays are treated as minimums and the next account will launch only after "
-            "the latest launched account's username is found in logs (Finished Verification)."
-        )
-        misc_layout.addRow(self.misc_log_confirmed_launch_mode_chk)
-        self.misc_bes_wait_for_username_logs_chk = QCheckBox(
-            "Wait for username in logs before BES throttling"
-        )
-        self.misc_bes_wait_for_username_logs_chk.setToolTip(
-            "Keep each newly launched Roblox window unthrottled until that "
-            "account's username is found in the log generation for the current process."
-        )
-        self.misc_bes_wait_for_username_logs_chk.setChecked(True)
-        misc_layout.addRow(self.misc_bes_wait_for_username_logs_chk)
-        self.misc_disable_manager_bad_marking_chk = QCheckBox("Disable manager auto-BAD marking")
-        self.misc_disable_manager_bad_marking_chk.setToolTip(
-            "When enabled, launch/auth failures will no longer automatically mark accounts as BAD.\n"
-            "Warning: invalid cookies may keep retrying Roblox auth requests and can hit rate limits."
-        )
-        self.misc_disable_manager_bad_marking_chk.toggled.connect(self._sync_misc_disable_bad_marking_warning)
-        self.misc_disable_manager_bad_marking_chk.clicked.connect(self._warn_misc_disable_bad_marking_enabled)
-        misc_layout.addRow(self.misc_disable_manager_bad_marking_chk)
-        self.misc_disable_manager_bad_marking_warn_lbl = QLabel(
-            "Warning: invalid cookies may keep retrying Roblox auth requests and can trigger rate limiting."
-        )
-        self.misc_disable_manager_bad_marking_warn_lbl.setWordWrap(True)
-        self.misc_disable_manager_bad_marking_warn_lbl.setStyleSheet(f"color: {ModernStyle.WARNING};")
-        self.misc_disable_manager_bad_marking_warn_lbl.setVisible(False)
-        misc_layout.addRow(self.misc_disable_manager_bad_marking_warn_lbl)
-        self.misc_msedgewebview2_limiter_enabled_chk = QCheckBox("Enable msedgewebview2 Limiter")
-        self.misc_msedgewebview2_limiter_enabled_chk.setToolTip(
-            "When enabled, msedgewebview2.exe processes are killed after launch log confirmation. (May interfere with Edge Browser)"
-        )
-        self.misc_msedgewebview2_limiter_enabled_chk.setChecked(True)
-        misc_layout.addRow(self.misc_msedgewebview2_limiter_enabled_chk)
-        self.misc_close_bootstrapper_error_popups_chk = QCheckBox("Auto-close Fishstrap/Bloxstrap error popups")
-        self.misc_close_bootstrapper_error_popups_chk.setToolTip(
-            "Automatically dismiss the bootstrapper's \"Connectivity error\" (403) popup so launches aren't left waiting on it."
-        )
-        self.misc_close_bootstrapper_error_popups_chk.setChecked(True)
-        misc_layout.addRow(self.misc_close_bootstrapper_error_popups_chk)
-        content_layout.addWidget(misc_box)
-
-        launch_priority_group = QGroupBox("Launch Priority")
-        launch_priority_layout = QVBoxLayout(launch_priority_group)
-        launch_priority_layout.setSpacing(10)
-        launch_priority_layout.setContentsMargins(12, 16, 12, 12)
-
-        launch_priority_hint = QLabel(
-            "Higher priority accounts launch first when multiple accounts are waiting to launch."
-        )
-        launch_priority_hint.setWordWrap(True)
-        launch_priority_hint.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        launch_priority_hint.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        launch_priority_layout.addWidget(launch_priority_hint)
-
-        self.launch_priority_search_input = QLineEdit()
-        self.launch_priority_search_input.setPlaceholderText("Search username or user ID")
-        self.launch_priority_search_input.setToolTip("Filter launch priority accounts by username or user ID.")
-        try:
-            self.launch_priority_search_input.setClearButtonEnabled(True)
-        except Exception:
-            pass
-        self.launch_priority_search_input.textChanged.connect(lambda _text: self._populate_launch_priority_table())
-        launch_priority_layout.addWidget(self.launch_priority_search_input)
-
-        self.launch_priority_table = QTableWidget()
-        self.launch_priority_table.setObjectName("launchPriorityTable")
-        self.launch_priority_table.setStyleSheet(
-            f"""
-            QTableWidget#launchPriorityTable::item {{
-                padding: 4px 8px;
-            }}
-            QTableWidget#launchPriorityTable QSpinBox {{
-                background-color: {ModernStyle.SURFACE};
-                color: {ModernStyle.TEXT_PRIMARY};
-                border: 2px solid {ModernStyle.BORDER};
-                border-radius: 6px;
-                padding: 4px 26px 4px 8px;
-            }}
-            QTableWidget#launchPriorityTable QSpinBox::up-button,
-            QTableWidget#launchPriorityTable QSpinBox::down-button {{
-                subcontrol-origin: border;
-                width: 20px;
-                border-left: 1px solid {ModernStyle.BORDER};
-                background-color: {ModernStyle.SURFACE_VARIANT};
-            }}
-            QTableWidget#launchPriorityTable QSpinBox::up-button {{
-                subcontrol-position: top right;
-                border-top-right-radius: 6px;
-                border-bottom: 1px solid {ModernStyle.BORDER};
-            }}
-            QTableWidget#launchPriorityTable QSpinBox::down-button {{
-                subcontrol-position: bottom right;
-                border-bottom-right-radius: 6px;
-                border-top: none;
-            }}
-            QTableWidget#launchPriorityTable QSpinBox::up-button:hover,
-            QTableWidget#launchPriorityTable QSpinBox::down-button:hover {{
-                background-color: {ModernStyle.BORDER};
-            }}
-            QTableWidget#launchPriorityTable QSpinBox::up-arrow,
-            QTableWidget#launchPriorityTable QSpinBox::down-arrow {{
-                image: none;
-                width: 0px;
-                height: 0px;
-            }}
-            """
-        )
-        self.launch_priority_table.setColumnCount(4)
-        self.launch_priority_table.setHorizontalHeaderLabels(["User ID", "Username", "Priority", "Status"])
-        self.launch_priority_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.launch_priority_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.launch_priority_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._launch_priority_status_delegate = _LaunchPriorityStatusDelegate(self.launch_priority_table)
-        self.launch_priority_table.setItemDelegateForColumn(3, self._launch_priority_status_delegate)
-        priority_row_height = 44
-        priority_visible_rows = 6
-        self.launch_priority_table.verticalHeader().setDefaultSectionSize(priority_row_height)
-        self.launch_priority_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        try:
-            priority_min_height = (
-                self.launch_priority_table.frameWidth() * 2
-                + self.launch_priority_table.horizontalHeader().sizeHint().height()
-                + (priority_row_height * priority_visible_rows)
-                + self.launch_priority_table.horizontalScrollBar().sizeHint().height()
-                + 8
-            )
-        except Exception:
-            priority_min_height = 260
-        self.launch_priority_table.setMinimumHeight(priority_min_height)
-        priority_header = self.launch_priority_table.horizontalHeader()
-        priority_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        priority_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        priority_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.launch_priority_table.setColumnWidth(2, 132)
-        priority_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        launch_priority_layout.addWidget(self.launch_priority_table)
-
-        launch_priority_buttons = QHBoxLayout()
-        launch_priority_refresh_btn = QPushButton("Refresh Accounts")
-        launch_priority_refresh_btn.clicked.connect(self._populate_launch_priority_table)
-        launch_priority_reset_btn = QPushButton("Reset Priorities")
-        launch_priority_reset_btn.clicked.connect(self._reset_launch_priorities_ui)
-        launch_priority_buttons.addWidget(launch_priority_refresh_btn)
-        launch_priority_buttons.addWidget(launch_priority_reset_btn)
-        launch_priority_buttons.addStretch()
-        launch_priority_layout.addLayout(launch_priority_buttons)
-        content_layout.addWidget(launch_priority_group)
-
-        # ── Webhooks (Per-webhook biome filters) ─────────────────────────────────
-        webhooks_group = QGroupBox("Biome Webhooks")
-        webhooks_v = QVBoxLayout(webhooks_group)
-
-        info_lbl = QLabel("Each row is a webhook. Choose how each biome should notify.")
-        info_lbl.setWordWrap(True)
-        webhooks_v.addWidget(info_lbl)
-
-        self.webhooks_table = QTableWidget()
-        self.webhooks_table.setColumnCount(2 + len(GUI_BIOME_NAMES))  # Name + URL + biomes...
-        headers = ["Name", "Webhook URL"] + GUI_BIOME_NAMES
-        self.webhooks_table.setHorizontalHeaderLabels(headers)
-        self.webhooks_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.webhooks_table.setShowGrid(False)
-        self.webhooks_table.setAlternatingRowColors(False)
-
-        header = self.webhooks_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        # Make biome columns wide enough so the combobox text is visible when closed
-        header.setMinimumSectionSize(150)
-        vh = self.webhooks_table.verticalHeader()
-        vh.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        vh.setDefaultSectionSize(62)   # match Auto Item table sizing
-        vh.setMinimumSectionSize(62)   # prevents squeeze below readable height
-        visible_webhook_rows = 4
-        table_frame = self.webhooks_table.frameWidth() * 2
-        header_height = self.webhooks_table.horizontalHeader().sizeHint().height()
-        row_height = vh.defaultSectionSize() * visible_webhook_rows
-        scrollbar_height = self.webhooks_table.horizontalScrollBar().sizeHint().height()
-        self.webhooks_table.setMinimumHeight(table_frame + header_height + row_height + scrollbar_height)
-        # Keep the existing dropdown behavior; just remove gridlines/fit row height above.
-
-        for c in range(2, 2 + len(GUI_BIOME_NAMES)):
-            header.setSectionResizeMode(c, QHeaderView.ResizeMode.Fixed)
-            self.webhooks_table.setColumnWidth(c, 150)
-        webhooks_v.addWidget(self.webhooks_table)
-
-        btn_row = QHBoxLayout()
-        add_btn = QPushButton("Add Webhook")
-        rem_btn = QPushButton("Remove Selected")
-        route_btn = QPushButton("Assign Users...")
-        cols_btn = QPushButton("Biome Columns...")
-        custom_biomes_btn = QPushButton("Custom Biomes...")
-        role_ping_btn = QPushButton("Role ID Pings...")
-        test_webhook_btn = QPushButton("Test Webhook")
-        test_webhook_btn.clicked.connect(self.test_selected_webhook)
-        btn_row.addWidget(add_btn); btn_row.addWidget(rem_btn); btn_row.addWidget(route_btn); btn_row.addWidget(cols_btn); btn_row.addWidget(custom_biomes_btn); btn_row.addWidget(role_ping_btn); btn_row.addWidget(test_webhook_btn); btn_row.addStretch()
-        webhooks_v.addLayout(btn_row)
-
-        MODE_ITEMS = ("None", "Message", "Everyone")  # tri-mode per biome cell
-
-        def _apply_webhook_biome_column_visibility(hidden_biomes=None):
-            """Hide biome columns visually; values still load/save normally."""
-            hidden_set = set()
-            if isinstance(hidden_biomes, (list, tuple, set)):
-                hidden_set = {str(b).strip().upper() for b in hidden_biomes if str(b).strip()}
-
-            self._webhooks_hidden_biomes = set(hidden_set)
-
-            for idx, biome in enumerate(GUI_BIOME_NAMES):
-                col = 2 + idx
-                self.webhooks_table.setColumnHidden(col, str(biome).strip().upper() in hidden_set)
-
-        def _open_webhook_columns_dialog():
-            current_hidden = getattr(self, "_webhooks_hidden_biomes", set()) or set()
-            if not isinstance(current_hidden, (list, tuple, set)):
-                current_hidden = set()
-            current_hidden = {str(b).strip().upper() for b in current_hidden if str(b).strip()}
-
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Webhook Biome Columns")
-            dlg.resize(460, 520)
-
-            v = QVBoxLayout(dlg)
-            hint = QLabel("Uncheck biomes to hide their columns in the table.\nHidden columns are still active.")
-            hint.setWordWrap(True)
-            v.addWidget(hint)
-
-            lw = QListWidget()
-            for biome in GUI_BIOME_NAMES:
-                key = str(biome).strip().upper()
-                item = QListWidgetItem(str(biome))
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(Qt.CheckState.Unchecked if key in current_hidden else Qt.CheckState.Checked)
-                item.setData(Qt.ItemDataRole.UserRole, key)
-                lw.addItem(item)
-            v.addWidget(lw)
-
-            quick_row = QHBoxLayout()
-            show_all_btn = QPushButton("Show All")
-            hide_all_btn = QPushButton("Hide All")
-            quick_row.addWidget(show_all_btn)
-            quick_row.addWidget(hide_all_btn)
-            quick_row.addStretch()
-            v.addLayout(quick_row)
-
-            btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-            v.addWidget(btn_box)
-
-            def _set_all(state: Qt.CheckState):
-                for i in range(lw.count()):
-                    it = lw.item(i)
-                    if it is not None:
-                        it.setCheckState(state)
-
-            show_all_btn.clicked.connect(lambda: _set_all(Qt.CheckState.Checked))
-            hide_all_btn.clicked.connect(lambda: _set_all(Qt.CheckState.Unchecked))
-
-            def _apply_and_close():
-                hidden = set()
-                for i in range(lw.count()):
-                    it = lw.item(i)
-                    if it is None:
-                        continue
-                    key = it.data(Qt.ItemDataRole.UserRole)
-                    if it.checkState() != Qt.CheckState.Checked:
-                        hidden.add(str(key).strip().upper())
-                _apply_webhook_biome_column_visibility(hidden)
-                dlg.accept()
-
-            btn_box.accepted.connect(_apply_and_close)
-            btn_box.rejected.connect(dlg.reject)
-            dlg.exec()
-
-        def _apply_user_filter_to_row(
-            row: int,
-            user_ids=None,
-            user_map: Optional[dict] = None,
-            all_user_ids=None,
-            user_filter_mode: str = "whitelist",
-        ):
-            """Persist the selected users and surface a quick tooltip."""
-            name_item = self.webhooks_table.item(row, 0)
-            url_item  = self.webhooks_table.item(row, 1)
-            target_item = name_item or url_item
-            if not target_item:
-                return
-
-            mode = _normalize_user_filter_mode(user_filter_mode)
-            target_item.setData(WEBHOOK_USER_FILTER_MODE_ROLE, mode)
-            tip = "Sends events for all users." if mode == "whitelist" else "Sends events for all users. Blacklist is empty."
-            cleaned = None
-            if user_ids is None:
-                target_item.setData(Qt.ItemDataRole.UserRole, None)
-            else:
-                cleaned = [str(u).strip() for u in (user_ids or []) if str(u).strip()]
-                # If caller passes the full universe, treat it as no filter for clarity.
-                if mode == "whitelist" and all_user_ids and set(cleaned) == set(all_user_ids):
-                    cleaned = None
-                    target_item.setData(Qt.ItemDataRole.UserRole, None)
-                else:
-                    target_item.setData(Qt.ItemDataRole.UserRole, cleaned)
-
-            # Keep the tooltip useful (preview a handful of names)
-            if cleaned is not None:
-                if user_map is None:
-                    try:
-                        user_map = self.config_manager.load_users() or {}
-                    except Exception:
-                        user_map = {}
-                if cleaned:
-                    names = []
-                    for uid in cleaned:
-                        info = user_map.get(uid, {}) if isinstance(user_map, dict) else {}
-                        names.append(info.get("username") or uid)
-                    preview = ", ".join(names[:4])
-                    suffix = "..." if len(names) > 4 else ""
-                    tip = f"Users: {preview}{suffix}" if mode == "whitelist" else f"Blocked users: {preview}{suffix}"
-                else:
-                    tip = (
-                        "No users selected. This webhook will be skipped until users are assigned."
-                        if mode == "whitelist"
-                        else "Sends events for all users. Blacklist is empty."
-                    )
-
-            if name_item:
-                name_item.setToolTip(tip)
-            if url_item:
-                url_item.setToolTip(tip)
-
-        def _row_data_item(row: int):
-            return self.webhooks_table.item(row, 0) or self.webhooks_table.item(row, 1)
-
-        def _user_filter_mode_for_row(row: int) -> str:
-            item = _row_data_item(row)
-            if item is None:
-                return "whitelist"
-            return _normalize_user_filter_mode(item.data(WEBHOOK_USER_FILTER_MODE_ROLE))
-
-        def _role_pings_for_row(row: int) -> dict:
-            item = _row_data_item(row)
-            if item is None:
-                return {}
-            return self._normalize_webhook_role_pings_config(item.data(WEBHOOK_ROLE_PINGS_ROLE))
-
-        def _apply_role_pings_to_row(row: int, role_pings=None):
-            item = _row_data_item(row)
-            if item is None:
-                return
-            item.setData(
-                WEBHOOK_ROLE_PINGS_ROLE,
-                self._normalize_webhook_role_pings_config(role_pings or {}),
-            )
-
-        def _mk_mode_combo(default_text: str = "None") -> QComboBox:
-            cmb = QComboBox()
-            cmb.addItems(("None", "Message", "Everyone"))
-            if default_text in ("None", "Message", "Everyone"):
-                cmb.setCurrentText(default_text)
-            
-            # Make the CLOSED state readable and consistent
-            cmb.setMinimumContentsLength(9)
-            cmb.setMinimumWidth(120)
-
-            # Match Auto Item control sizing
-            cmb.setMinimumHeight(30)
-            cmb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-            cmb.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
-
-            # Tighten vertical padding a bit; keep arrow space (legacy behavior).
-            cmb.setStyleSheet(
-                "QComboBox{min-height:10px; padding:2px 8px;}"
-                "QComboBox::drop-down{width:22px;}"
-            )
-            return cmb
-
-        def _place_centered(table: QTableWidget, row: int, col: int, w: QWidget):
-            """
-            Wrap `w` in a container and center it both horizontally & vertically.
-            Also give the holder enough minimum height so the child never clips.
-            """
-            holder = QWidget()
-            v = QVBoxLayout(holder)
-            holder.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-            holder.setStyleSheet("background: transparent;")
-            v.setContentsMargins(0, 6, 0, 6)   # breathing room to prevent border clipping
-            v.setSpacing(0)
-            v.addWidget(w, 1, Qt.AlignCenter)  # true H+V centering
-            # ensure the row will be at least the child height + a couple px
-            holder.setMinimumHeight(max(30, w.sizeHint().height() + 4))
-            table.setCellWidget(row, col, holder)
-            return holder
-
-
-        def add_webhook_row(
-            name: str = "",
-            url: str = "",
-            allowed_biomes=None,
-            biome_modes=None,
-            user_ids=None,
-            biome_role_pings=None,
-            user_filter_mode: str = "whitelist",
-        ):
-            """
-            allowed_biomes: Optional[List[str]]  -> kept for backward compatibility
-            biome_modes:    Optional[Dict[str, str]] per-biome: "None"|"Message"|"Everyone"
-                            If provided, it overrides the mode derived from allowed_biomes.
-            """
-            row = self.webhooks_table.rowCount()
-            self.webhooks_table.insertRow(row)
-
-            name_item = QTableWidgetItem(name or "")
-            url_item = QTableWidgetItem(url)
-            self.webhooks_table.setItem(row, 0, name_item)
-            self.webhooks_table.setItem(row, 1, url_item)
-            _apply_user_filter_to_row(row, user_ids, user_filter_mode=user_filter_mode)
-            _apply_role_pings_to_row(row, biome_role_pings)
-
-            allowed_set = {str(b).upper() for b in (allowed_biomes or [])}
-            biome_modes = biome_modes or {}
-
-            for idx, biome in enumerate(GUI_BIOME_NAMES):
-                bkey = str(biome).upper()
-                default_mode = "Message" if bkey in allowed_set else "None"
-                mode = biome_modes.get(bkey, default_mode)
-                combo = _mk_mode_combo(mode)
-                if bkey in HARD_EVERYONE_BIOMES and _bm_lock_enforced():
-                    combo.setCurrentText("Everyone")
-                    combo.setEnabled(False)
-                _place_centered(self.webhooks_table, row, 2 + idx, combo)
-
-            # Center + size the row based on the first combo’s height
-            first_holder = self.webhooks_table.cellWidget(row, 2)  # wrapper at first biome col
-            first_combo  = None
-            if first_holder:
-                first_combo = first_holder.findChild(QComboBox)
-
-            if first_combo:
-                need = first_combo.sizeHint().height() + 6  # 2–3 px above/below
-            else:
-                need = self.webhooks_table.verticalHeader().defaultSectionSize()
-
-            need = max(need, 34)  # don’t go below a comfortable default
-            self.webhooks_table.setRowHeight(row, need)
-
-
-        def remove_selected_rows():
-            rows = sorted({i.row() for i in self.webhooks_table.selectedIndexes()}, reverse=True)
-            for r in rows:
-                self.webhooks_table.removeRow(r)
-
-        def _open_webhook_user_dialog():
-            rows = self.webhooks_table.rowCount()
-            if rows == 0:
-                QMessageBox.information(self, "No webhooks", "Add a webhook before assigning users.")
-                return
-
-            try:
-                users_cfg = self.config_manager.load_users() or {}
-            except Exception:
-                users_cfg = {}
-
-            user_choices = [
-                {
-                    "id": str(uid).strip(),
-                    "username": str(info.get("username", uid)).strip(),
-                }
-                for uid, info in (users_cfg.items() if isinstance(users_cfg, dict) else [])
-            ]
-            # No sort: keep users.json insertion order so this list matches the
-            # Accounts tab row order (which also iterates users_config as-is).
-            # Deduplicate by canonicalized id (strip spaces) in case upstream data has duplicates/whitespace
-            uniq = []
-            seen_ids = set()
-            for u in user_choices:
-                cid = u["id"].strip()
-                if cid in seen_ids:
-                    continue
-                seen_ids.add(cid)
-                uniq.append({"id": cid, "username": u["username"]})
-            user_choices = uniq
-            choice_ids = [u["id"] for u in user_choices]
-            choice_set = set(choice_ids)
-            name_to_id = {u["username"].strip().lower(): u["id"] for u in user_choices if u["username"]}
-
-            entries = []
-            for r in range(rows):
-                name_item = self.webhooks_table.item(r, 0)
-                url_item  = self.webhooks_table.item(r, 1)
-                data_item = name_item or url_item
-                selected_raw = data_item.data(Qt.ItemDataRole.UserRole) if data_item else None
-                mode = _user_filter_mode_for_row(r)
-                # None  -> no explicit filter yet (default: all users)
-                # []    -> explicit "no users"
-                # [ids] -> explicit subset
-                selected_set = set()
-                if isinstance(selected_raw, (list, tuple, set)):
-                    selected_set = {str(u).strip() for u in selected_raw if str(u).strip()}
-                if selected_raw is None and choice_ids:
-                    selected_set = set(choice_ids) if mode == "whitelist" else set()
-                name_txt = (name_item.text().strip() if name_item else "")
-                url_txt = (url_item.text().strip() if url_item else "")
-                display = name_txt or url_txt or f"Webhook {r + 1}"
-                entries.append({
-                    "row": r,
-                    "name": name_txt,
-                    "url": url_txt,
-                    "display": display,
-                    "selected": selected_set,
-                    "mode": mode,
-                })
-
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Webhook User Routing")
-            dlg.resize(720, 520)
-
-            h = QHBoxLayout(dlg)
-            left_col = QVBoxLayout()
-            webhook_list = QListWidget()
-            webhook_list.setMinimumWidth(240)
-            for entry in entries:
-                webhook_list.addItem(QListWidgetItem(entry["display"]))
-            left_col.addWidget(webhook_list)
-
-            distribute_btn = QPushButton("Distribute Evenly")
-            left_col.addWidget(distribute_btn)
-            left_col.addStretch()
-            h.addLayout(left_col)
-
-            right = QVBoxLayout()
-            h.addLayout(right)
-
-            right.addWidget(QLabel("Choose users for the selected webhook's mode:"))
-
-            mode_row = QHBoxLayout()
-            mode_row.addWidget(QLabel("Mode:"))
-            mode_combo = QComboBox()
-            mode_combo.addItem("Whitelist", "whitelist")
-            mode_combo.addItem("Blacklist", "blacklist")
-            mode_combo.setToolTip("Whitelist allows only selected users. Blacklist allows everyone except selected users.")
-            mode_row.addWidget(mode_combo)
-            mode_row.addStretch()
-            right.addLayout(mode_row)
-
-            btn_row = QHBoxLayout()
-            select_all_btn = QPushButton("Select All")
-            deselect_all_btn = QPushButton("Deselect All")
-            stagger_btn = QPushButton("Stagger")
-            invert_btn = QPushButton("Invert")
-            btn_row.addWidget(select_all_btn)
-            btn_row.addWidget(deselect_all_btn)
-            btn_row.addWidget(stagger_btn)
-            btn_row.addWidget(invert_btn)
-            btn_row.addStretch()
-            right.addLayout(btn_row)
-
-            user_scroll = QScrollArea()
-            user_scroll.setWidgetResizable(True)
-            user_container = QWidget()
-            user_layout = QVBoxLayout(user_container)
-            user_layout.setContentsMargins(6, 6, 6, 6)
-            user_scroll.setWidget(user_container)
-            right.addWidget(user_scroll)
-
-            btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-            right.addWidget(btn_box)
-
-            current_checks: list[QCheckBox] = []
-            updating_mode_combo = False
-
-            def _clear_user_layout():
-                while user_layout.count():
-                    item = user_layout.takeAt(0)
-                    if item.widget():
-                        w = item.widget()
-                        w.setParent(None)
-                        w.deleteLater()
-                current_checks.clear()
-
-            def _build_user_checks(idx: int):
-                nonlocal updating_mode_combo
-                _clear_user_layout()
-                if idx < 0 or idx >= len(entries):
-                    user_layout.addWidget(QLabel("Select a webhook to edit."))
-                    user_layout.addStretch()
-                    return
-
-                entry = entries[idx]
-                updating_mode_combo = True
-                try:
-                    mode_idx = mode_combo.findData(_normalize_user_filter_mode(entry.get("mode", "whitelist")))
-                    mode_combo.setCurrentIndex(mode_idx if mode_idx >= 0 else 0)
-                finally:
-                    updating_mode_combo = False
-
-                # Normalize any legacy selections (usernames, mixed casing) to IDs where possible
-                def _resolve_to_id(val: str) -> str:
-                    val_clean = (val or "").strip()
-                    if not val_clean:
-                        return ""
-                    if val_clean in choice_set:
-                        return val_clean
-                    m = re.search(r"(\\d+)", val_clean)
-                    if m:
-                        cand = m.group(1)
-                        if cand in choice_set:
-                            return cand
-                    mapped = name_to_id.get(val_clean.lower())
-                    if mapped:
-                        return mapped
-                    return ""
-
-                normalized = set()
-                missing_raw = set()
-                for val in entry["selected"]:
-                    uid_resolved = _resolve_to_id(str(val))
-                    if uid_resolved:
-                        normalized.add(uid_resolved)
-                    else:
-                        missing_raw.add(str(val).strip())
-                entry["selected"] = normalized
-
-                if not user_choices and not entry["selected"]:
-                    user_layout.addWidget(QLabel("No users found. Add accounts first."))
-                    user_layout.addStretch()
-                    return
-
-                for u in user_choices:
-                    uid = u["id"]
-                    label = f"{u['username']} ({uid})" if u["username"] else uid
-                    cb = QCheckBox(label)
-                    cb.setChecked(uid in entry["selected"])
-                    cb.toggled.connect(lambda state, uid=uid, entry=entry:
-                                       entry["selected"].add(uid) if state else entry["selected"].discard(uid))
-                    user_layout.addWidget(cb)
-                    current_checks.append(cb)
-
-                extras = sorted(
-                    v for v in missing_raw
-                    if not _resolve_to_id(v)  # skip anything that actually matches a known user
-                )
-                if extras:
-                    user_layout.addWidget(QLabel("Missing / legacy users:"))
-                    for uid in extras:
-                        cb = QCheckBox(f"{uid} (not in users.json)")
-                        cb.setChecked(True)
-                        cb.toggled.connect(lambda state, uid=uid, entry=entry:
-                                           entry["selected"].add(uid) if state else entry["selected"].discard(uid))
-                        user_layout.addWidget(cb)
-                        current_checks.append(cb)
-
-                user_layout.addStretch()
-                user_scroll.verticalScrollBar().setValue(0)
-
-            def _set_checks(val: bool):
-                for cb in current_checks:
-                    cb.setChecked(val)
-
-            def _stagger_checks():
-                for idx, cb in enumerate(current_checks):
-                    cb.setChecked(idx % 2 == 0)
-
-            def _invert_checks():
-                for cb in current_checks:
-                    cb.setChecked(not cb.isChecked())
-
-            def _distribute_evenly():
-                if not entries or not choice_ids:
-                    return
-                extras_map = {e["row"]: {uid for uid in e["selected"] if uid not in choice_set} for e in entries}
-                for e in entries:
-                    e["mode"] = "whitelist"
-                    e["selected"] = set(extras_map.get(e["row"], set()))
-                for i, uid in enumerate(choice_ids):
-                    entries[i % len(entries)]["selected"].add(uid)
-                _build_user_checks(webhook_list.currentRow())
-
-            def _mode_changed(_idx: int):
-                if updating_mode_combo:
-                    return
-                idx = webhook_list.currentRow()
-                if idx < 0 or idx >= len(entries):
-                    return
-                entry = entries[idx]
-                old_mode = _normalize_user_filter_mode(entry.get("mode", "whitelist"))
-                new_mode = _normalize_user_filter_mode(mode_combo.currentData())
-                if old_mode == new_mode:
-                    return
-                entry["mode"] = new_mode
-                if old_mode == "whitelist" and new_mode == "blacklist" and set(entry.get("selected") or set()) == choice_set:
-                    entry["selected"] = set()
-                    for cb in current_checks:
-                        cb.setChecked(False)
-                elif old_mode == "blacklist" and new_mode == "whitelist" and not entry.get("selected"):
-                    entry["selected"] = set(choice_ids)
-                    for cb in current_checks:
-                        cb.setChecked(True)
-
-            select_all_btn.clicked.connect(lambda: _set_checks(True))
-            deselect_all_btn.clicked.connect(lambda: _set_checks(False))
-            stagger_btn.clicked.connect(_stagger_checks)
-            invert_btn.clicked.connect(_invert_checks)
-            distribute_btn.clicked.connect(_distribute_evenly)
-            mode_combo.currentIndexChanged.connect(_mode_changed)
-
-            webhook_list.currentRowChanged.connect(_build_user_checks)
-            webhook_list.setCurrentRow(0 if entries else -1)
-
-            btn_box.rejected.connect(dlg.reject)
-
-            def _persist_webhook_users_only():
-                settings = self.config_manager.load_settings()
-                existing = settings.get("webhooks", []) or []
-                if not isinstance(existing, list):
-                    existing = []
-
-                # Only persist per-webhook user routing; do NOT save name/url/biomes/modes here.
-                updates: dict[str, tuple[bool, list[str], str]] = {}
-                for entry in entries:
-                    row_idx = entry["row"]
-                    name_item = self.webhooks_table.item(row_idx, 0)
-                    url_item = self.webhooks_table.item(row_idx, 1)
-                    url = (url_item.text().strip() if url_item else "")
-                    if not url:
-                        continue
-
-                    data_item = name_item or url_item
-                    user_filter = data_item.data(Qt.ItemDataRole.UserRole) if data_item else None
-                    mode = _normalize_user_filter_mode(data_item.data(WEBHOOK_USER_FILTER_MODE_ROLE) if data_item else "whitelist")
-                    selected_users: list[str] = []
-                    explicit_users = False
-                    if isinstance(user_filter, (list, tuple, set)):
-                        explicit_users = True
-                        selected_users = [str(u).strip() for u in user_filter if str(u).strip()]
-                        selected_users = sorted({u for u in selected_users})
-                        # If the explicit selection equals "all users", treat it as no filter.
-                        if mode == "whitelist" and choice_ids and set(selected_users) == set(choice_ids):
-                            explicit_users = False
-                            selected_users = []
-                    if mode == "blacklist":
-                        explicit_users = True
-
-                    updates[url] = (explicit_users, selected_users, mode)
-
-                if not updates:
-                    return
-
-                updated_any = False
-                for wh in existing:
-                    if not isinstance(wh, dict):
-                        continue
-                    url = str(wh.get("url", "") or "").strip()
-                    if url not in updates:
-                        continue
-                    explicit_users, selected_users, mode = updates[url]
-                    if explicit_users:
-                        wh["users"] = selected_users
-                        wh["users_explicit"] = True
-                    else:
-                        wh.pop("users", None)
-                        wh.pop("users_explicit", None)
-                    if mode == "blacklist":
-                        wh["user_filter_mode"] = "blacklist"
-                    else:
-                        wh.pop("user_filter_mode", None)
-                    updated_any = True
-
-                if not updated_any:
-                    return
-
-                settings["webhooks"] = existing
-                if self.config_manager.save_settings(settings):
-                    # Update baseline routing only so other unsaved changes remain "dirty".
-                    baseline = getattr(self, "_settings_baseline", None)
-                    if isinstance(baseline, dict):
-                        base_hooks = baseline.get("webhooks", None)
-                        if isinstance(base_hooks, list):
-                            for bh in base_hooks:
-                                if not isinstance(bh, dict):
-                                    continue
-                                burl = str(bh.get("url", "") or "").strip()
-                                if burl not in updates:
-                                    continue
-                                explicit_users, selected_users, mode = updates[burl]
-                                if explicit_users:
-                                    bh["users"] = selected_users
-                                    bh["users_explicit"] = True
-                                else:
-                                    bh.pop("users", None)
-                                    bh.pop("users_explicit", None)
-                                if mode == "blacklist":
-                                    bh["user_filter_mode"] = "blacklist"
-                                else:
-                                    bh.pop("user_filter_mode", None)
-
-                    try:
-                        if self.worker_thread and self.worker_thread.isRunning():
-                            self.worker_thread.apply_new_settings(settings)
-                    except Exception:
-                        pass
-
-            def _apply_selections_and_close():
-                for entry in entries:
-                    _apply_user_filter_to_row(
-                        entry["row"],
-                        sorted(entry["selected"]),
-                        user_map=users_cfg,
-                        all_user_ids=choice_ids,
-                        user_filter_mode=entry.get("mode", "whitelist"),
-                    )
-                _persist_webhook_users_only()
-                dlg.accept()
-
-            btn_box.accepted.connect(_apply_selections_and_close)
-
-            _build_user_checks(0 if entries else -1)
-            dlg.exec()
-
-        def _open_webhook_role_ping_dialog():
-            rows = self.webhooks_table.rowCount()
-            if rows == 0:
-                QMessageBox.information(self, "No webhooks", "Add a webhook before adding role pings.")
-                return
-
-            role_biomes = [
-                str(b).strip().upper()
-                for b in GUI_BIOME_NAMES
-                if str(b).strip() and str(b).strip().upper() not in HARD_EVERYONE_BIOMES
-            ]
-            if not role_biomes:
-                QMessageBox.information(self, "Role ID Pings", "No eligible biomes are available.")
-                return
-
-            entries = []
-            for r in range(rows):
-                name_item = self.webhooks_table.item(r, 0)
-                url_item = self.webhooks_table.item(r, 1)
-                name_txt = (name_item.text().strip() if name_item else "")
-                url_txt = (url_item.text().strip() if url_item else "")
-                display = name_txt or url_txt or f"Webhook {r + 1}"
-                entries.append({
-                    "row": r,
-                    "display": display,
-                    "pings": dict(_role_pings_for_row(r)),
-                })
-
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Webhook Role ID Pings")
-            dlg.resize(760, 560)
-
-            h = QHBoxLayout(dlg)
-            left_col = QVBoxLayout()
-            webhook_list = QListWidget()
-            webhook_list.setMinimumWidth(240)
-            for entry in entries:
-                webhook_list.addItem(QListWidgetItem(entry["display"]))
-            left_col.addWidget(webhook_list)
-
-            clear_all_btn = QPushButton("Clear All")
-            left_col.addWidget(clear_all_btn)
-            left_col.addStretch()
-            h.addLayout(left_col)
-
-            right = QVBoxLayout()
-            h.addLayout(right)
-
-            top_row = QHBoxLayout()
-            clear_current_btn = QPushButton("Clear Current")
-            top_row.addWidget(clear_current_btn)
-            top_row.addStretch()
-            right.addLayout(top_row)
-
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            fields_widget = QWidget()
-            fields_form = QFormLayout(fields_widget)
-            fields_form.setContentsMargins(6, 6, 6, 6)
-            fields_form.setSpacing(8)
-            scroll.setWidget(fields_widget)
-            right.addWidget(scroll)
-
-            btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-            right.addWidget(btn_box)
-
-            current_idx = [-1]
-            editors: dict[str, QLineEdit] = {}
-
-            def _clear_fields():
-                while fields_form.count():
-                    item = fields_form.takeAt(0)
-                    if item is None:
-                        continue
-                    w = item.widget()
-                    if w is not None:
-                        w.setParent(None)
-                        w.deleteLater()
-
-            def _save_current_fields():
-                idx = current_idx[0]
-                if idx < 0 or idx >= len(entries):
-                    return
-                cleaned = {}
-                for biome_key, edit in editors.items():
-                    role_id = self._normalize_role_id_for_ping(edit.text())
-                    if role_id:
-                        cleaned[biome_key] = role_id
-                entries[idx]["pings"] = cleaned
-
-            def _build_role_fields(idx: int):
-                _save_current_fields()
-                editors.clear()
-                _clear_fields()
-                current_idx[0] = idx
-                if idx < 0 or idx >= len(entries):
-                    fields_form.addRow(QLabel("Select a webhook to edit."))
-                    return
-
-                pings = entries[idx].get("pings", {}) or {}
-                for biome_key in role_biomes:
-                    edit = QLineEdit()
-                    edit.setPlaceholderText("Role ID")
-                    edit.setText(str(pings.get(biome_key, "") or ""))
-                    edit.setToolTip("Discord role ID. Mentions like <@&123> are accepted.")
-                    editors[biome_key] = edit
-                    fields_form.addRow(str(biome_key), edit)
-                scroll.verticalScrollBar().setValue(0)
-
-            def _clear_current():
-                idx = current_idx[0]
-                if 0 <= idx < len(entries):
-                    entries[idx]["pings"] = {}
-                for edit in editors.values():
-                    edit.clear()
-
-            def _clear_all():
-                for entry in entries:
-                    entry["pings"] = {}
-                for edit in editors.values():
-                    edit.clear()
-
-            def _apply_role_pings_and_close():
-                _save_current_fields()
-                for entry in entries:
-                    _apply_role_pings_to_row(entry["row"], entry.get("pings", {}))
-                dlg.accept()
-
-            clear_current_btn.clicked.connect(_clear_current)
-            clear_all_btn.clicked.connect(_clear_all)
-            webhook_list.currentRowChanged.connect(_build_role_fields)
-            btn_box.accepted.connect(_apply_role_pings_and_close)
-            btn_box.rejected.connect(dlg.reject)
-
-            webhook_list.setCurrentRow(0 if entries else -1)
-            _build_role_fields(0 if entries else -1)
-            dlg.exec()
-
-        add_btn.clicked.connect(lambda: add_webhook_row("", ""))
-        rem_btn.clicked.connect(remove_selected_rows)
-        route_btn.clicked.connect(_open_webhook_user_dialog)
-        def _rebuild_biome_columns():
-            """Re-sync the webhook table with the (re-loaded) biome catalog, keeping rows."""
-            saved = self._collect_webhooks_from_ui()
-            hidden = set(getattr(self, "_webhooks_hidden_biomes", set()) or set())
-
-            load_biomes_catalog()
-            GUI_BIOME_NAMES[:] = [b for b in biome_names() if str(b).upper() != "NORMAL"]
-
-            self.webhooks_table.setColumnCount(2 + len(GUI_BIOME_NAMES))
-            self.webhooks_table.setHorizontalHeaderLabels(["Name", "Webhook URL"] + GUI_BIOME_NAMES)
-            for c in range(2, 2 + len(GUI_BIOME_NAMES)):
-                header.setSectionResizeMode(c, QHeaderView.ResizeMode.Fixed)
-                self.webhooks_table.setColumnWidth(c, 150)
-
-            self.webhooks_table.setRowCount(0)
-            for wh in saved:
-                add_webhook_row(
-                    wh.get("name", ""),
-                    wh.get("url", ""),
-                    wh.get("biomes") or [],
-                    wh.get("biome_modes") or {},
-                    wh.get("users") if wh.get("users_explicit") else None,
-                    wh.get("biome_role_pings") or {},
-                    wh.get("user_filter_mode", "whitelist"),
-                )
-            _apply_webhook_biome_column_visibility(hidden)
-
-        def _open_custom_biomes_dialog():
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Custom Biomes")
-            dlg.resize(520, 560)
-
-            v = QVBoxLayout(dlg)
-            hint = QLabel(
-                "Add your own biomes, or override a built-in one. "
-                "The name must match the biome text Roblox reports (case does not matter). "
-                "Removing only clears your own entry - built-in biomes come back."
-            )
-            hint.setWordWrap(True)
-            v.addWidget(hint)
-
-            lw = QListWidget()
-            v.addWidget(lw, 1)
-
-            form = QFormLayout()
-            name_edit = QLineEdit(); name_edit.setPlaceholderText("INCINERATOR")
-            color_edit = QLineEdit(); color_edit.setPlaceholderText("0xff6a00 (optional)")
-            timer_edit = QLineEdit(); timer_edit.setPlaceholderText("duration in seconds (optional)")
-            thumb_edit = QLineEdit(); thumb_edit.setPlaceholderText("thumbnail URL (optional)")
-            form.addRow("Name", name_edit)
-            form.addRow("Color", color_edit)
-            form.addRow("Timer (s)", timer_edit)
-            form.addRow("Thumbnail", thumb_edit)
-            v.addLayout(form)
-
-            def _refresh():
-                lw.clear()
-                custom = {str(k).upper() for k in load_custom_biomes().keys()}
-                for b in biome_names():
-                    label = f"{b}  (custom)" if str(b).upper() in custom else str(b)
-                    item = QListWidgetItem(label)
-                    item.setData(Qt.ItemDataRole.UserRole, str(b))
-                    lw.addItem(item)
-
-            def _on_pick():
-                item = lw.currentItem()
-                if item is None:
-                    return
-                b = str(item.data(Qt.ItemDataRole.UserRole))
-                color, thumb = biome_meta(b)
-                dur = biome_duration(b)
-                name_edit.setText(b)
-                color_edit.setText("0x%06x" % int(color))
-                thumb_edit.setText(thumb)
-                timer_edit.setText("" if dur is None else str(dur))
-
-            def _save():
-                try:
-                    saved_name = save_custom_biome(
-                        name_edit.text(),
-                        color_edit.text(),
-                        thumb_edit.text(),
-                        timer_edit.text().strip() or None,
-                    )
-                except Exception as e:
-                    QMessageBox.warning(dlg, "Custom Biomes", f"Could not save: {e}")
-                    return
-                _rebuild_biome_columns()
-                _refresh()
-                QMessageBox.information(dlg, "Custom Biomes", f"Saved {saved_name}.")
-
-            def _remove():
-                item = lw.currentItem()
-                if item is None:
-                    return
-                b = str(item.data(Qt.ItemDataRole.UserRole))
-                try:
-                    removed = delete_custom_biome(b)
-                except Exception as e:
-                    QMessageBox.warning(dlg, "Custom Biomes", f"Could not remove: {e}")
-                    return
-                if not removed:
-                    QMessageBox.information(dlg, "Custom Biomes", f"{b} is built in - nothing of yours to remove.")
-                    return
-                _rebuild_biome_columns()
-                _refresh()
-
-            row = QHBoxLayout()
-            save_btn = QPushButton("Add / Update")
-            del_btn = QPushButton("Remove")
-            row.addWidget(save_btn); row.addWidget(del_btn); row.addStretch()
-            v.addLayout(row)
-
-            btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-            v.addWidget(btn_box)
-
-            lw.currentRowChanged.connect(lambda _: _on_pick())
-            save_btn.clicked.connect(_save)
-            del_btn.clicked.connect(_remove)
-            btn_box.rejected.connect(dlg.reject)
-            btn_box.accepted.connect(dlg.accept)
-
-            _refresh()
-            dlg.exec()
-
-        cols_btn.clicked.connect(_open_webhook_columns_dialog)
-        custom_biomes_btn.clicked.connect(_open_custom_biomes_dialog)
-        role_ping_btn.clicked.connect(_open_webhook_role_ping_dialog)
-
-        # expose helpers for load/save
-        self._add_webhook_row = add_webhook_row
-        self._clear_webhook_rows = lambda: self.webhooks_table.setRowCount(0)
-        self._apply_webhook_biome_column_visibility = _apply_webhook_biome_column_visibility
-
-        content_layout.addWidget(webhooks_group)
-
-        # --- Multiscope, Merchant & Pings (simple, no custom helpers) ---
-        ms_box = QGroupBox("Merchant Webhook & Pings")
-        ms_form = QFormLayout(ms_box)
-
-        self.ms_merchant_webhook_input = QLineEdit()
-        self.ms_merchant_webhook_input.setEchoMode(QLineEdit.EchoMode.Password)
-
-        self.ms_player_tracker_input = QLineEdit()
-        self.ms_player_tracker_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.ms_player_tracker_input.setPlaceholderText("Discord webhook for player-join logs (optional)")
-
-        self.ms_enable_jester = QCheckBox("Enable Jester pings")
-        self.ms_enable_mari   = QCheckBox("Enable Mari pings")
-        self.ms_enable_rin    = QCheckBox("Enable Rin pings")
-        self.ms_merchant_detection_mode = QComboBox()
-        self.ms_merchant_detection_mode.addItem("Asset ID (Default)", "asset_id")
-        self.ms_merchant_detection_mode.addItem("Legacy Chat Line", "legacy_chat")
-
-        type_opts = ["None", "User ID", "Role ID"]
-
-        self.ms_jester_type = QComboBox(); self.ms_jester_type.addItems(type_opts)
-        self.ms_jester_id   = QLineEdit();  self.ms_jester_id.setPlaceholderText("numeric ID or @everyone")
-        self.ms_mari_type   = QComboBox();  self.ms_mari_type.addItems(type_opts)
-        self.ms_mari_id     = QLineEdit();  self.ms_mari_id.setPlaceholderText("numeric ID or @everyone")
-        self.ms_rin_type    = QComboBox();  self.ms_rin_type.addItems(type_opts)
-        self.ms_rin_id      = QLineEdit();  self.ms_rin_id.setPlaceholderText("numeric ID or @everyone")
-
-        # tidy two-control rows without custom helpers:
-        jester_row = QWidget(); jester_h = QHBoxLayout(jester_row); jester_h.setContentsMargins(0,0,0,0)
-        jester_h.addWidget(self.ms_jester_type); jester_h.addWidget(self.ms_jester_id)
-
-        mari_row = QWidget(); mari_h = QHBoxLayout(mari_row); mari_h.setContentsMargins(0,0,0,0)
-        mari_h.addWidget(self.ms_mari_type); mari_h.addWidget(self.ms_mari_id)
-
-        rin_row = QWidget(); rin_h = QHBoxLayout(rin_row); rin_h.setContentsMargins(0,0,0,0)
-        rin_h.addWidget(self.ms_rin_type); rin_h.addWidget(self.ms_rin_id)
-
-        ms_form.addRow("Merchant Webhook URL", self.ms_merchant_webhook_input)
-        ms_form.addRow("Player Tracker Webhook URL", self.ms_player_tracker_input)
-        ms_form.addRow("Merchant Detection Mode", self.ms_merchant_detection_mode)
-        ms_form.addRow(self.ms_enable_jester)
-        ms_form.addRow("Jester ping type / ID", jester_row)
-        ms_form.addRow(self.ms_enable_mari)
-        ms_form.addRow("Mari ping type / ID", mari_row)
-        ms_form.addRow(self.ms_enable_rin)
-        ms_form.addRow("Rin ping type / ID", rin_row)
-
-        ms_test_row = QHBoxLayout()
-        ms_test_btn = QPushButton("Test Webhook")
-        ms_test_btn.clicked.connect(self.test_merchant_pings)
-        ms_test_row.addWidget(ms_test_btn)
-        ms_test_row.addStretch()
-        ms_form.addRow(ms_test_row)
-
-        content_layout.addWidget(ms_box)
-
-        # ── Save / Reset ─────────────────────────────────────────────────────────
-        buttons_layout = QHBoxLayout()
-        save_settings_btn = QPushButton("Save Settings"); save_settings_btn.setProperty("class", "success"); save_settings_btn.clicked.connect(lambda: self.save_settings())
-        reset_settings_btn = QPushButton("Reset to Defaults"); reset_settings_btn.clicked.connect(self.reset_settings)
-        export_config_btn = QPushButton("Export Config"); export_config_btn.setToolTip("Export all configured settings to a single file."); export_config_btn.clicked.connect(self.export_config)
-        import_config_btn = QPushButton("Import Config"); import_config_btn.setToolTip("Load a config file and make it the active settings."); import_config_btn.clicked.connect(self.import_config)
-        buttons_layout.addWidget(save_settings_btn); buttons_layout.addWidget(reset_settings_btn); buttons_layout.addWidget(export_config_btn); buttons_layout.addWidget(import_config_btn); buttons_layout.addStretch()
-        content_layout.addLayout(buttons_layout); content_layout.addStretch()
-
-        scroll_area.setWidget(content_widget); layout.addWidget(scroll_area)
-        self.settings_tab_index = self.tab_widget.addTab(settings_widget, "Settings")
-        self.load_settings_tab()
-
-    def append_log(self, s: str):
-        self.add_log(s)
-
-    def setup_RAMEXPORT_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
-        # ── API parameters ─────────────────────────────────────────
-        form = QFormLayout()
-
-        self.ram_port_input  = QLineEdit("7963")
-        form.addRow("RAM Port:", self.ram_port_input)
-
-        self.ram_group_input = QLineEdit()
-        form.addRow("Group (Blank = All):", self.ram_group_input)
-
-        self.ram_pwd_input   = QLineEdit()
-        self.ram_pwd_input.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addRow("Password:", self.ram_pwd_input)
-
-        layout.addLayout(form)
-
-        # ── merge / replace toggles ───────────────────────────────
-        self.merge_chk = QCheckBox("Merge with existing users.json (otherwise replace)")
-        self.merge_chk.setChecked(True)
-        layout.addWidget(self.merge_chk)
-
-        self.replace_cookie_chk = QCheckBox("Overwrite existing cookies")
-        self.replace_ps_chk     = QCheckBox("Overwrite existing private-servers")
-
-        def _merge_toggled(checked: bool):          # checked is True / False
-            self.replace_cookie_chk.setEnabled(checked)
-            self.replace_ps_chk.setEnabled(checked)
-
-        self.merge_chk.toggled.connect(_merge_toggled)   # use toggled(bool)
-        _merge_toggled(self.merge_chk.isChecked())       # set initial state
-
-        layout.addWidget(self.replace_cookie_chk)
-        layout.addWidget(self.replace_ps_chk)
-
-        # ── run button ─────────────────────────────────────────────
-        run_btn = QPushButton("Fetch && Apply Accounts")
-        run_btn.setProperty("class", "success")
-        run_btn.clicked.connect(self.execute_ram_import)
-        layout.addWidget(run_btn)
-
-        layout.addStretch()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(tab)
-        return scroll
-        
     @staticmethod
     def _make_dev_card(name: str,
                     movie_bytes: bytes,
@@ -27852,253 +20869,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         return card
     
 
-    def _build_credits_widget(self) -> QWidget:
-        credits_widget = QWidget()
-        layout = QVBoxLayout(credits_widget)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-        content_widget = QWidget()
-        content_layout = QVBoxLayout(content_widget)
-        content_layout.setSpacing(20)
-
-        title_label = QLabel("JARAM Credits")
-        title_font = QFont()
-        title_font.setPointSize(24)
-        title_font.setBold(True)
-        title_label.setFont(title_font)
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_label.setStyleSheet(f"color: {ModernStyle.PRIMARY}; margin: 20px 0;")
-        content_layout.addWidget(title_label)
-
-        developer_group = QGroupBox("Developer")
-
-        # ── Two dev cards, side-by-side ──────────────────────────────
-        developer_layout = QHBoxLayout(developer_group)
-        developer_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        developer_layout.setSpacing(40)
-
-        #, ManasAarohi,
-        bytes_m = b""
-        try:
-            bytes_m = Path(__file__).with_name("manas.png").read_bytes()
-        except Exception:
-            try:
-                from urllib.request import Request
-                req = Request(
-                    "https://cdn.discordapp.com/avatars/561923311530016790/5ec41258a398f8aec742d74e6f1978ec.png?size=4096",
-                    headers={"User-Agent": "Mozilla/5.0"},
-                )
-                bytes_m = urlopen(req).read()
-            except Exception:
-                bytes_m = b""
-        developer_layout.addWidget(self._make_dev_card("ManasAarohi", bytes_m))
-
-        #, Jirach1,
-        bytes_j = b""
-        try:
-            bytes_j = Path(__file__).with_name("jirachi.gif").read_bytes()
-        except Exception:
-            try:
-                bytes_j = urlopen("https://media.tenor.com/7c8Mqt2ciZgAAAAi/jirachi.gif").read()
-            except Exception:
-                bytes_j = b""
-
-        developer_layout.addWidget(self._make_dev_card("Jirach1", bytes_j))
-
-        #, cresqnt,
-        bytes_c = b""
-        try:
-            bytes_c = Path(__file__).with_name("cresqnt.gif").read_bytes()
-        except Exception:
-            try:
-                bytes_c = urlopen("https://media1.tenor.com/m/CNBGgG2DU10AAAAd/nyan-cat-poptart.gif").read()
-            except Exception:
-                bytes_c = b""
-
-        developer_layout.addWidget(self._make_dev_card("cresqnt",  bytes_c))
-
-        content_layout.addWidget(developer_group)
-
-        support_group = QGroupBox("Essentials")
-        support_layout = QVBoxLayout(support_group)
-
-        support_label_manas = QLabel("Manas Biome Hunt:")
-        support_label_manas.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-bottom: 5px;")
-        support_layout.addWidget(support_label_manas)
-
-        discord_btn_manas = QPushButton("https://discord.gg/oppression")
-        discord_btn_manas.setStyleSheet(f"""
-            QPushButton {{
-                background-color: #5865F2;
-                color: white;
-                border: none;
-                padding: 12px 20px;
-                border-radius: 6px;
-                font-weight: bold;
-                text-align: left;
-            }}
-            QPushButton:hover {{
-                background-color: #4752C4;
-            }}
-        """)
-        discord_btn_manas.clicked.connect(lambda: self.open_url("https://discord.gg/oppression"))
-        support_layout.addWidget(discord_btn_manas)
-
-        support_label = QLabel("The Official J.Jaram Discord Server:")
-        support_label.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-bottom: 5px;")
-        support_layout.addWidget(support_label)
-
-        discord_btn = QPushButton("https://discord.gg/TheGlitchCore")
-        discord_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: 
-                color: white;
-                border: none;
-                padding: 12px 20px;
-                border-radius: 6px;
-                font-weight: bold;
-                text-align: left;
-            }}
-            QPushButton:hover {{
-                background-color: 
-            }}
-        """)
-        discord_btn.clicked.connect(lambda: self.open_url("https://discord.gg/TheGlitchCore"))
-        support_layout.addWidget(discord_btn)
-
-        content_layout.addWidget(support_group) 
-#---------------------------------------------------------------------------------------------------
-        support_group2 = QGroupBox("Additional") #lazy copy and paste...
-        support_layout2 = QVBoxLayout(support_group2)
-
-        support_label2 = QLabel("Scope Development:")
-        support_label2.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-bottom: 5px;")
-        support_layout2.addWidget(support_label2)
-
-        discord_btn2 = QPushButton("https://discord.gg/6cuCu6ymkX")
-        discord_btn2.setStyleSheet(f"""
-            QPushButton {{
-                background-color: 
-                color: white;
-                border: none;
-                padding: 12px 20px;
-                border-radius: 6px;
-                font-weight: bold;
-                text-align: left;
-            }}
-            QPushButton:hover {{
-                background-color: 
-            }}
-        """)
-        discord_btn2.clicked.connect(lambda: self.open_url("https://discord.gg/6cuCu6ymkX"))
-        support_layout2.addWidget(discord_btn2)
-
-        bes_label = QLabel("BES (Battle Encoder Shirase):")
-        bes_label.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-top: 10px; margin-bottom: 5px;")
-        support_layout2.addWidget(bes_label)
-
-        bes_btn = QPushButton("https://mion.yosei.fi/BES/")
-        bes_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: 
-                color: white;
-                border: none;
-                padding: 12px 20px;
-                border-radius: 6px;
-                font-weight: bold;
-                text-align: left;
-            }}
-            QPushButton:hover {{
-                background-color: 
-            }}
-        """)
-        bes_btn.clicked.connect(lambda: self.open_url("https://mion.yosei.fi/BES/"))
-        support_layout2.addWidget(bes_btn)
-
-        placeholder_label = QLabel("RAM-Limiter (Trimmer Inspiration):")
-        placeholder_label.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-top: 10px; margin-bottom: 5px;")
-        support_layout2.addWidget(placeholder_label)
-
-        placeholder_btn = QPushButton("https://github.com/0vm/RAM-Limiter")
-        placeholder_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: 
-                color: white;
-                border: none;
-                padding: 12px 20px;
-                border-radius: 6px;
-                font-weight: bold;
-                text-align: left;
-            }}
-            QPushButton:hover {{
-                background-color: 
-            }}
-        """)
-        placeholder_btn.clicked.connect(lambda: self.open_url("https://github.com/0vm/RAM-Limiter"))
-        support_layout2.addWidget(placeholder_btn)
-
-        multiscope_fix_label = QLabel("MultiScope Merchant Fix")
-        multiscope_fix_label.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-top: 10px; margin-bottom: 5px;")
-        support_layout2.addWidget(multiscope_fix_label)
-
-        multiscope_fix_btn = QPushButton("https://github.com/ManasAarohi1/MultiScope-Fix")
-        multiscope_fix_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: 
-                color: white;
-                border: none;
-                padding: 12px 20px;
-                border-radius: 6px;
-                font-weight: bold;
-                text-align: left;
-            }}
-            QPushButton:hover {{
-                background-color: 
-            }}
-        """)
-        multiscope_fix_btn.clicked.connect(lambda: self.open_url("https://github.com/ManasAarohi1/MultiScope-Fix"))
-        support_layout2.addWidget(multiscope_fix_btn)
-
-        content_layout.addWidget(support_group2)
-        
-        license_group = QGroupBox("License | Legal")
-        license_layout = QVBoxLayout(license_group)
-
-        copyright_label = QLabel("© 2025 cresqnt")
-        copyright_label.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-bottom: 10px;")
-        license_layout.addWidget(copyright_label)
-
-        license_label = QLabel("Licensed under AGPL-3.0")
-        license_label.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY}; margin-bottom: 10px;")
-        license_layout.addWidget(license_label)
-
-        content_layout.addWidget(license_group)
-
-        content_layout.addStretch()
-
-        scroll_area.setWidget(content_widget)
-        layout.addWidget(scroll_area)
-
-        return credits_widget
-
-    def show_credits(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("JARAM Credits")
-        dlg.setMinimumSize(640, 520)
-        dlg.resize(760, 680)
-
-        layout = QVBoxLayout(dlg)
-        layout.addWidget(self._build_credits_widget())
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(dlg.reject)
-        layout.addWidget(buttons)
-
-        dlg.exec()
-        
     def execute_ram_import(self):
         base_url = f"http://127.0.0.1:{self.ram_port_input.text().strip() or '7963'}"
         params   = {
@@ -28354,6 +21124,10 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             "/psl <account> [place_id] [game_slug] [server_name] [estimated_value] [only_without_private_server_link]",
             "/block <account> <target> [force]",
             "/unblock <account> <target> [force]",
+            "/manager [status|start|pause|resume|stop]",
+            "/biomes",
+            "/scbr <item> <enabled>",
+            "/found",
         ]
         if _bm_relaxed():
             commands.insert(1, "/list")
@@ -28370,119 +21144,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             + "Notes\n"
             + "\n".join(f"- {note}" for note in notes)
         )
-
-    def _get_discord_control_tab_style(self) -> str:
-        return f"""
-            QLabel[discordRole="muted"] {{
-                color: {ModernStyle.TEXT_SECONDARY};
-                background: transparent;
-            }}
-            QLabel[discordRole="sectionTitle"] {{
-                color: {ModernStyle.TEXT_PRIMARY};
-                font-size: 13px;
-                font-weight: 700;
-                background: transparent;
-            }}
-            QLabel[discordRole="panelNote"] {{
-                background-color: {ModernStyle.SURFACE_VARIANT};
-                border: 1px solid {ModernStyle.BORDER};
-                border-radius: 8px;
-                padding: 8px 10px;
-                color: {ModernStyle.TEXT_SECONDARY};
-            }}
-            QLabel[discordRole="badge"] {{
-                border-radius: 14px;
-                padding: 8px 14px;
-                font-weight: 700;
-            }}
-            QSplitter::handle {{
-                background-color: {ModernStyle.BORDER};
-            }}
-        """
-
-    def _get_discord_control_table_style(self) -> str:
-        return f"""
-            QTableWidget {{
-                background-color: {ModernStyle.SURFACE};
-                border: 1px solid {ModernStyle.BORDER};
-                border-radius: 8px;
-                gridline-color: {ModernStyle.BORDER};
-                selection-background-color: {ModernStyle.PRIMARY_VARIANT};
-                alternate-background-color: {ModernStyle.SURFACE_VARIANT};
-                color: {ModernStyle.TEXT_PRIMARY};
-            }}
-            QTableWidget::item {{
-                padding: 8px;
-                border-bottom: 1px solid {ModernStyle.BORDER};
-                color: {ModernStyle.TEXT_PRIMARY};
-            }}
-            QTableWidget::item:selected {{
-                background-color: {ModernStyle.PRIMARY_VARIANT};
-                color: {ModernStyle.TEXT_PRIMARY};
-            }}
-            QHeaderView::section {{
-                background-color: {ModernStyle.SURFACE_VARIANT};
-                color: {ModernStyle.TEXT_PRIMARY};
-                padding: 8px 10px;
-                border: none;
-                border-right: 1px solid {ModernStyle.BORDER};
-                font-weight: 600;
-            }}
-        """
-
-    def _get_discord_control_picker_style(self) -> str:
-        return f"""
-            QListWidget {{
-                background-color: {ModernStyle.SURFACE};
-                border: 1px solid {ModernStyle.BORDER};
-                border-radius: 8px;
-                color: {ModernStyle.TEXT_PRIMARY};
-                outline: none;
-                alternate-background-color: {ModernStyle.SURFACE_VARIANT};
-            }}
-            QListWidget::item {{
-                padding: 8px 10px;
-                border-bottom: 1px solid {ModernStyle.BORDER};
-                color: {ModernStyle.TEXT_PRIMARY};
-                background-color: transparent;
-            }}
-            QListWidget::item:hover {{
-                background-color: {ModernStyle.SURFACE_VARIANT};
-            }}
-            QListWidget::item:selected {{
-                background-color: {ModernStyle.PRIMARY_VARIANT};
-                color: {ModernStyle.TEXT_PRIMARY};
-            }}
-            QListWidget::item:selected:!active {{
-                background-color: {ModernStyle.PRIMARY_VARIANT};
-                color: {ModernStyle.TEXT_PRIMARY};
-            }}
-        """
-
-    def _get_discord_control_danger_button_style(self) -> str:
-        return f"""
-            QPushButton {{
-                background-color: {ModernStyle.ERROR};
-                color: {ModernStyle.TEXT_PRIMARY};
-                border: none;
-                padding: 8px 16px;
-                border-radius: 6px;
-                font-weight: 500;
-                font-size: 13px;
-                min-width: 80px;
-                min-height: 28px;
-            }}
-            QPushButton:hover {{
-                background-color: #dc2626;
-            }}
-            QPushButton:pressed {{
-                background-color: #b91c1c;
-            }}
-            QPushButton:disabled {{
-                background-color: {ModernStyle.SURFACE_VARIANT};
-                color: {ModernStyle.TEXT_SECONDARY};
-            }}
-        """
 
     def _get_discord_user_link_manager(self, *, create: bool = False):
         manager = getattr(self, "discord_user_link_manager", None)
@@ -28512,17 +21173,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 pass
             return None
 
-    def _update_discord_control_editor_state(
-        self,
-        discord_uid: str,
-        entries: Optional[List[Tuple[str, str]]] = None,
-        *,
-        total_accounts: int = 0,
-    ) -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.update_editor_state(discord_uid, entries, total_accounts=total_accounts)
-
     def _discord_control_uid_sort_key(self, value: str) -> Tuple[int, object]:
         text = str(value or "").strip()
         if text.isdigit():
@@ -28535,286 +21185,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
     def _discord_control_account_sort_key(self, uid: str, username: str) -> Tuple[str, Tuple[int, object]]:
         user_text = str(username or uid).strip().lower()
         return (user_text, self._discord_control_uid_sort_key(uid))
-
-    def _discord_control_selected_entries(self, users: dict) -> List[Tuple[str, str]]:
-        manager = self._get_discord_user_link_manager()
-        return manager.selected_entries(users) if manager is not None else []
-
-    def _refresh_discord_control_picker_count(
-        self,
-        *,
-        total_accounts: Optional[int] = None,
-        visible_count: Optional[int] = None,
-    ) -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.refresh_picker_count(total_accounts=total_accounts, visible_count=visible_count)
-
-    def _sync_discord_control_selected_account_ids_from_picker(self) -> Set[str]:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            return manager.sync_selected_account_ids_from_picker()
-        selected_ids = {str(uid) for uid in (getattr(self, "discord_control_selected_account_ids", set()) or set())}
-        self.discord_control_selected_account_ids = selected_ids
-        return selected_ids
-
-    def _select_discord_control_link_table_row(self, discord_uid: str) -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.select_link_table_row(discord_uid)
-
-    def _begin_new_discord_control_link(self) -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.begin_new_link()
-
-    def _on_discord_control_editor_id_changed(self, _text: str = "") -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.on_editor_id_changed(_text)
-
-    def _on_discord_control_account_item_changed(self, item: QListWidgetItem) -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.on_account_item_changed(item)
-
-    def _refresh_discord_control_accounts_picker_filter(self) -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.refresh_picker_filter()
-
-    def _set_discord_control_accounts_picker_selection(self, selected: bool) -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.set_picker_selection(selected)
-
-    def setup_discord_control_tab(self):
-        self._ensure_discord_control_service()
-
-        tab = QWidget()
-        tab.setStyleSheet(self._get_discord_control_tab_style())
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(14)
-
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(12)
-
-        header = QLabel("Discord Control")
-        header.setStyleSheet(
-            f"font-size: 18px; font-weight: bold; color: {ModernStyle.TEXT_PRIMARY}; padding: 10px 0;"
-        )
-        header_row.addWidget(header)
-        header_row.addStretch(1)
-
-        self.discord_control_status_label = QLabel("Stopped")
-        self.discord_control_status_label.setProperty("discordRole", "badge")
-        self.discord_control_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.discord_control_status_label.setMinimumWidth(148)
-        header_row.addWidget(self.discord_control_status_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addLayout(header_row)
-
-        link_management_visible = _bm_relaxed()
-        sub_text = (
-            "Connect a Discord bot that can manage accounts from slash commands."
-        )
-        if not link_management_visible:
-            sub_text = (
-                "Connect a Discord bot that can manage accounts from slash commands. "
-            )
-        sub = QLabel(sub_text)
-        sub.setWordWrap(True)
-        sub.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        layout.addWidget(sub)
-
-        self.discord_control_status_detail_label = QLabel("Discord bot is stopped.")
-        self.discord_control_status_detail_label.setStyleSheet(
-            f"color: {ModernStyle.TEXT_SECONDARY}; font-weight: bold;"
-        )
-        self.discord_control_status_detail_label.setWordWrap(True)
-        layout.addWidget(self.discord_control_status_detail_label)
-
-        config_box = QGroupBox("Bot Configuration")
-        config_layout = QVBoxLayout(config_box)
-        config_layout.setSpacing(12)
-
-        config_intro = QLabel(
-            "Store the bot token locally, define Discord admins, and control whether the bot starts when JARAM opens."
-        )
-        config_intro.setWordWrap(True)
-        config_intro.setProperty("discordRole", "muted")
-        config_layout.addWidget(config_intro)
-
-        config_form = QFormLayout()
-        config_form.setContentsMargins(0, 0, 0, 0)
-        config_form.setHorizontalSpacing(12)
-        config_form.setVerticalSpacing(10)
-        config_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
-
-        self.discord_control_enabled_chk = QCheckBox("Auto-start bot when JARAM opens")
-        config_form.addRow(self.discord_control_enabled_chk)
-
-        self.discord_control_token_input = QLineEdit()
-        self.discord_control_token_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.discord_control_token_input.setPlaceholderText("Discord bot token")
-        config_form.addRow("Bot Token:", self.discord_control_token_input)
-
-        self.discord_control_admin_users_input = QTextEdit()
-        self.discord_control_admin_users_input.setMaximumHeight(58)
-        self.discord_control_admin_users_input.setPlaceholderText("Comma or newline separated Discord user IDs")
-        config_form.addRow("Admin User IDs:", self.discord_control_admin_users_input)
-
-        self.discord_control_admin_roles_input = QTextEdit()
-        self.discord_control_admin_roles_input.setMaximumHeight(58)
-        self.discord_control_admin_roles_input.setPlaceholderText("Comma or newline separated Discord role IDs")
-        config_form.addRow("Admin Role IDs:", self.discord_control_admin_roles_input)
-
-        self.discord_control_allow_admin_perm_chk = QCheckBox("Allow members with Discord Administrator permission")
-        self.discord_control_allow_admin_perm_chk.setChecked(True)
-        config_form.addRow(self.discord_control_allow_admin_perm_chk)
-
-        config_layout.addLayout(config_form)
-
-        btn_row = QHBoxLayout()
-        self.discord_control_save_btn = QPushButton("Save Config")
-        self.discord_control_save_btn.setStyleSheet(self._get_secondary_button_style())
-        self.discord_control_save_btn.clicked.connect(self._save_discord_control_config_from_ui)
-        btn_row.addWidget(self.discord_control_save_btn)
-
-        self.discord_control_start_btn = QPushButton("Start Bot")
-        self.discord_control_start_btn.setStyleSheet(self._get_primary_button_style())
-        self.discord_control_start_btn.clicked.connect(self._start_discord_control_bot_from_ui)
-        btn_row.addWidget(self.discord_control_start_btn)
-
-        self.discord_control_stop_btn = QPushButton("Stop Bot")
-        self.discord_control_stop_btn.setStyleSheet(self._get_discord_control_danger_button_style())
-        self.discord_control_stop_btn.clicked.connect(self._stop_discord_control_bot_from_ui)
-        btn_row.addWidget(self.discord_control_stop_btn)
-        btn_row.addStretch(1)
-        config_layout.addLayout(btn_row)
-
-        dep_msg = ""
-        try:
-            dep_msg = self.discord_control_service.dependency_error() if self.discord_control_service else ""
-        except Exception:
-            dep_msg = ""
-        if dep_msg:
-            dep_label = QLabel(dep_msg)
-            dep_label.setWordWrap(True)
-            dep_label.setStyleSheet(f"color: {ModernStyle.WARNING}; font-weight: 600;")
-            config_layout.addWidget(dep_label)
-
-        layout.addWidget(config_box)
-
-        main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_splitter.setChildrenCollapsible(False)
-
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(12)
-
-        link_manager = self._get_discord_user_link_manager(create=link_management_visible)
-        if link_manager is not None:
-            try:
-                link_manager.add_link_management_panels(
-                    main_splitter,
-                    right_layout,
-                    visible=link_management_visible,
-                )
-            except Exception as exc:
-                self.discord_user_link_manager = None
-                self.add_log(f"[Discord Control] Discord user linking UI unavailable: {exc}")
-
-        commands_box = QGroupBox("Slash Command Reference")
-        commands_layout = QVBoxLayout(commands_box)
-        self.discord_control_help_box = QTextEdit()
-        self.discord_control_help_box.setReadOnly(True)
-        self.discord_control_help_box.setFont(QFont("Consolas", 9))
-        self.discord_control_help_box.setMaximumHeight(220)
-        commands_layout.addWidget(self.discord_control_help_box)
-        right_layout.addWidget(commands_box, 2)
-
-        log_box = QGroupBox("Discord Control Log")
-        log_layout = QVBoxLayout(log_box)
-        self.discord_control_log_box = QTextEdit()
-        self.discord_control_log_box.setReadOnly(True)
-        self.discord_control_log_box.setFont(QFont("Consolas", 9))
-        self.discord_control_log_box.setMinimumHeight(180)
-        try:
-            self.discord_control_log_box.document().setMaximumBlockCount(250)
-        except Exception:
-            pass
-        log_layout.addWidget(self.discord_control_log_box)
-        right_layout.addWidget(log_box, 3)
-        main_splitter.addWidget(right_panel)
-
-        main_splitter.setStretchFactor(0, 6)
-        main_splitter.setStretchFactor(1, 5)
-        main_splitter.setSizes([780, 560])
-        layout.addWidget(main_splitter, 1)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(tab)
-        self.discord_control_tab_index = self.tab_widget.addTab(scroll, "Discord")
-
-        config = self._load_discord_control_config()
-        token = str(config.get("token") or "")
-        try:
-            raw_encrypted_token = str(
-                getattr(self.config_manager, "_settings_raw_encrypted_discord_token", "") or ""
-            ) or self.config_manager._raw_encrypted_discord_token_from_disk()
-        except Exception:
-            raw_encrypted_token = ""
-        self._discord_control_token_hidden_until_unlock = bool(
-            not token
-            and self.config_manager.cookie_encryption_enabled()
-            and not self.config_manager.is_cookie_unlocked()
-            and raw_encrypted_token
-        )
-        self.discord_control_enabled_chk.setChecked(bool(config.get("enabled", False)))
-        self.discord_control_token_input.setText(token)
-        self.discord_control_admin_users_input.setPlainText("\n".join(config.get("admin_user_ids", [])))
-        self.discord_control_admin_roles_input.setPlainText("\n".join(config.get("admin_role_ids", [])))
-        self.discord_control_allow_admin_perm_chk.setChecked(
-            bool(config.get("allow_discord_admin_permission", True))
-        )
-        self._refresh_discord_control_command_docs()
-        self._refresh_discord_control_accounts_table()
-        self._on_discord_control_state_changed("stopped", "Discord bot is stopped.")
-        self._apply_discord_tabs_visibility()
-
-    def _save_discord_control_config_from_ui(self) -> None:
-        self._refresh_discord_control_token_after_cookie_unlock()
-        config = self._discord_control_config_from_ui()
-        if not self._save_discord_control_config(config):
-            err = ""
-            try:
-                err = self.config_manager.get_cookie_error()
-            except Exception:
-                err = ""
-            QMessageBox.critical(
-                self,
-                "Discord Control",
-                "Failed to save Discord control settings." + (f"\n\n{err}" if err else ""),
-            )
-            return
-
-        running = bool(self.discord_control_service and self.discord_control_service.is_running())
-        if running:
-            stop_ok, stop_msg = self.discord_control_service.stop()
-            if not stop_ok:
-                QMessageBox.warning(self, "Discord Control", stop_msg)
-                return
-            if str(config.get("token") or "").strip():
-                start_ok, start_msg = self.discord_control_service.start(self._discord_control_runtime_config(config))
-                if not start_ok:
-                    QMessageBox.warning(self, "Discord Control", start_msg)
-                    return
-
-        QMessageBox.information(self, "Discord Control", "Discord control settings saved.")
 
     def _start_discord_control_bot_from_ui(self) -> None:
         self._refresh_discord_control_token_after_cookie_unlock()
@@ -28877,93 +21247,10 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             except Exception:
                 pass
 
-    def _on_discord_control_state_changed(self, state: str, message: str) -> None:
-        label = getattr(self, "discord_control_status_label", None)
-        detail_label = getattr(self, "discord_control_status_detail_label", None)
-        key = str(state or "").strip().lower()
-        if label is not None:
-            colour = ModernStyle.TEXT_SECONDARY
-            border = ModernStyle.BORDER
-            display = "Stopped"
-            background = ModernStyle.SURFACE_VARIANT
-            if key == "running":
-                colour = ModernStyle.SECONDARY
-                border = ModernStyle.SECONDARY
-                background = ModernStyle.SURFACE
-                display = "Bot Online"
-            elif key == "starting":
-                colour = ModernStyle.WARNING
-                border = ModernStyle.WARNING
-                background = ModernStyle.SURFACE
-                display = "Connecting"
-            elif key == "error":
-                colour = ModernStyle.ERROR
-                border = ModernStyle.ERROR
-                background = ModernStyle.SURFACE
-                display = "Attention Required"
-            label.setText(display)
-            label.setToolTip(str(message or display))
-            label.setStyleSheet(
-                f"background-color: {background}; "
-                f"color: {colour}; "
-                f"border: 1px solid {border}; "
-                f"border-radius: 14px; "
-                f"padding: 8px 14px; "
-                f"font-weight: 700;"
-            )
-
-        if detail_label is not None:
-            detail_label.setText(str(message or "Discord bot is stopped."))
-
-        running_like = key in {"running", "starting"}
-        start_btn = getattr(self, "discord_control_start_btn", None)
-        stop_btn = getattr(self, "discord_control_stop_btn", None)
-        if start_btn is not None:
-            start_btn.setEnabled(not running_like)
-        if stop_btn is not None:
-            stop_btn.setEnabled(running_like)
-
-    def _build_discord_control_link_index(self, users: Optional[dict] = None) -> Dict[str, List[Tuple[str, str]]]:
-        manager = self._get_discord_user_link_manager()
-        return manager.build_link_index(users) if manager is not None else {}
-
-    def _normalize_single_discord_user_id(self, raw: object) -> str:
-        ids = normalize_discord_ids(raw)
-        return ids[0] if len(ids) == 1 else ""
-
-    def _format_discord_control_link_summary(self, entries: List[Tuple[str, str]]) -> str:
-        manager = self._get_discord_user_link_manager()
-        return manager.format_link_summary(entries) if manager is not None else ""
-
-    def _populate_discord_control_accounts_picker(
-        self,
-        users: dict,
-        *,
-        selected_account_ids: Optional[Set[str]] = None,
-    ) -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.populate_accounts_picker(users, selected_account_ids=selected_account_ids)
-
     def _refresh_discord_control_accounts_table(self) -> None:
         manager = self._get_discord_user_link_manager()
         if manager is not None:
             manager.refresh_accounts_table()
-
-    def _on_discord_control_discord_user_selection_changed(self) -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.on_discord_user_selection_changed()
-
-    def _save_selected_discord_control_links(self) -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.save_selected_links()
-
-    def _clear_selected_discord_control_links(self) -> None:
-        manager = self._get_discord_user_link_manager()
-        if manager is not None:
-            manager.clear_selected_links()
 
     def _submit_discord_control_request(self, payload: dict, timeout: float = 15.0) -> dict:
         envelope = {
@@ -29082,6 +21369,10 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             "grab_private_server_link": "/psl",
             "block_user": "/block",
             "unblock_user": "/unblock",
+            "manager_control": "/manager",
+            "list_biomes": "/biomes",
+            "set_auto_sc_br": "/scbr",
+            "found_stats": "/found",
             "set_linked_auto_action_row_user": "/action",
             "set_auto_action_row_user": "/action",
         }
@@ -29883,7 +22174,112 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             response = self._discord_control_block_or_unblock_user(payload, unblock=True)
             self._discord_control_record_command_usage(payload, response=response)
             return response
+        handlers = {
+            "manager_control": self._discord_control_manager,
+            "list_biomes": self._discord_control_list_biomes,
+            "set_auto_sc_br": self._discord_control_set_auto_sc_br,
+            "found_stats": self._discord_control_found_stats,
+        }
+        if action_type in handlers:
+            response = handlers[action_type](payload)
+            self._discord_control_record_command_usage(payload, response=response)
+            return response
         return {"ok": False, "message": f"Unknown Discord control request: {action_type or 'missing'}"}
+
+    def _discord_control_manager_status_text(self) -> str:
+        if self._manager_paused:
+            state = "paused"
+        elif self._is_manager_running():
+            state = "running"
+        else:
+            return "The manager is stopped."
+        text = f"The manager is {state}"
+        if self.start_time:
+            mins = int((time.time() - float(self.start_time)) // 60)
+            text += f" ({mins // 60}h {mins % 60}m)"
+        active = sum(1 for d in (self.user_data or {}).values() if d.get("status") == "Active")
+        return text + f". {active} of {len(self.config_manager.peek_users() or {})} accounts in game."
+
+    def _discord_control_manager(self, payload: dict) -> dict:
+        """/manager status|start|pause|resume|stop. Never opens a dialog (it would block the bot)."""
+        action = str((payload or {}).get("action") or "status").strip().lower()
+        running = self._is_manager_running()
+        if action == "start":
+            if running or self._manager_paused:
+                return {"ok": False, "message": self._discord_control_manager_status_text()}
+            if not self.config_manager.get_users_for_manager():
+                return {"ok": False, "message": "No accounts to launch. Add accounts in the app first."}
+            self.start_manager()
+        elif action == "pause":
+            if not running or self._manager_paused:
+                return {"ok": False, "message": self._discord_control_manager_status_text()}
+            self.pause_manager()
+        elif action == "resume":
+            if not self._manager_paused:
+                return {"ok": False, "message": self._discord_control_manager_status_text()}
+            self.resume_manager()
+        elif action == "stop":
+            if not running and not self._manager_paused:
+                return {"ok": False, "message": "The manager is already stopped."}
+            self.stop_manager()
+        elif action != "status":
+            return {"ok": False, "message": "Use status, start, pause, resume or stop."}
+        if action != "status":
+            self.add_log(f"[Discord Control] /manager {action} from Discord.")
+        return {"ok": True, "message": self._discord_control_manager_status_text()}
+
+    def _discord_control_list_biomes(self, payload: dict) -> dict:
+        """/biomes: every server whose biome is not NORMAL, rarest-looking first (shortest biomes last)."""
+        rows = list(getattr(self, "_multiscope_table_latest_rows", None) or [])
+        lines = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            biome = str(r.get("last_biome") or r.get("biome") or "").strip()
+            if not biome or biome.upper() == "NORMAL":
+                continue
+            users = r.get("users") or r.get("username") or ""
+            names = ", ".join(str(u) for u in users) if isinstance(users, (list, tuple)) else str(users)
+            age = str(r.get("biome_age") or "").strip()
+            lines.append(f"{biome}: {names}" + (f" ({age})" if age else ""))
+        if not lines:
+            return {"ok": True, "message": "No account is in a special biome right now."}
+        lines.sort()
+        more = f"\n...and {len(lines) - 25} more." if len(lines) > 25 else ""
+        return {"ok": True, "message": "Biomes right now:\n" + "\n".join(lines[:25]) + more}
+
+    def _discord_control_set_auto_sc_br(self, payload: dict) -> dict:
+        """/scbr <sc|br|both> <on|off>: uses the accounts set up in the app (setup needs the app's dialog)."""
+        item = str((payload or {}).get("item") or "both").strip().lower()
+        on = bool((payload or {}).get("enabled", True))
+        ids = {"sc": ["sol_sc"], "br": ["sol_br"], "both": ["sol_sc", "sol_br"]}.get(item)
+        if ids is None:
+            return {"ok": False, "message": "Item must be sc, br or both."}
+        items = self._current_auto_item_items()
+        rows = self._sol_rows(items)
+        names = {"sol_sc": "Strange Controller", "sol_br": "Biome Randomizer"}
+        changed = []
+        for preset_id in ids:
+            row = rows.get(self._SOL_ROW_IDS[preset_id])
+            if row is None or not row.get("users_explicit"):
+                if on:
+                    return {"ok": False, "message": f"{names[preset_id]} is not set up yet. Turn it on once in the app "
+                                                    "to pick its accounts and window size."}
+                continue
+            row["enabled"] = on
+            changed.append(names[preset_id])
+        if changed:
+            self._load_auto_item_items_table(items)
+            self._on_auto_item_ui_changed()
+            self._sync_sol_toggles()
+        state = "on" if on else "off"
+        return {"ok": True, "message": (" and ".join(changed) + f" turned {state}.") if changed else f"Already {state}."}
+
+    def _discord_control_found_stats(self, payload: dict) -> dict:
+        snap = self._get_found_stats_snapshot() or {}
+        b = int(snap.get("biomes_total_count", 0) or 0)
+        m = int(snap.get("merchants_total_count", 0) or 0)
+        return {"ok": True, "message": f"Found so far: {b:,} biomes and {m:,} merchants."}
 
     def _discord_control_list_linked_accounts(self, payload: dict) -> dict:
         actor_id = str((payload or {}).get("discord_user_id") or "").strip()
@@ -30227,24 +22623,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             return
         if self.worker_thread and self.worker_thread.isRunning():
             return
-        if self._settings_prompt_ready and self.settings_tab_index is not None:
-            if self.tab_widget.currentIndex() == self.settings_tab_index:
-                changes = self._get_settings_changes()
-                if changes:
-                    result = self._prompt_settings_save(
-                        title="Unsaved Settings",
-                        message="You have unsaved settings changes. Save before starting the manager?",
-                        allow_cancel=True,
-                        changes=changes,
-                        no_text="Revert",
-                    )
-                    if result == QMessageBox.StandardButton.Yes:
-                        if not self.save_settings(confirm=False):
-                            return
-                    elif result == QMessageBox.StandardButton.Cancel:
-                        return
-                    elif result == QMessageBox.StandardButton.No:
-                        self.load_settings_tab()
+        self.shell.autosave_settings.flush()  # a change made a moment ago is saved before the manager reads settings
 
         try:
             config = self.config_manager.get_users_for_manager()
@@ -30281,6 +22660,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self.worker_thread.process_signal.connect(self.update_process_data)
         # NEW: Multiscope snapshot updates the tab
         self.worker_thread.multiscope_signal.connect(self.update_multiscope)
+        self.worker_thread.bloxgen_replace_signal.connect(self._auto_replace_on_flag)
         self.worker_thread.merchant_signal.connect(self._handle_merchant_for_auto_actions)
 
         self.worker_thread.start()
@@ -30327,6 +22707,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
     ):
         worker_stopped = True
         stopped_state = None
+        self._maintain_enabled = False  # stop reconciling headcount once stopped
         if self.worker_thread and self.worker_thread.isRunning():
             wt = self.worker_thread
             wt.stop(shutdown_ms=shutdown_ms)
@@ -30516,6 +22897,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self.worker_thread.status_signal.connect(self.update_user_status)
         self.worker_thread.process_signal.connect(self.update_process_data)
         self.worker_thread.multiscope_signal.connect(self.update_multiscope)
+        self.worker_thread.bloxgen_replace_signal.connect(self._auto_replace_on_flag)
         self.worker_thread.merchant_signal.connect(self._handle_merchant_for_auto_actions)
         self.worker_thread.ready_signal.connect(self._on_resumed_worker_ready)
 
@@ -30548,39 +22930,31 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self.status_label.setText("Status: Resuming")
         self.status_label.setStyleSheet(f"color: {ModernStyle.WARNING}; font-weight: bold;")
 
-    def update_ui(self):
-        active_users = sum(1 for data in self.user_data.values() if data.get('status') == 'Active')
-        total_processes = sum(len(data.get('pids', [])) for data in self.user_data.values())
-        pending_restarts = sum(1 for data in self.user_data.values() if data.get('needs_restart', False))
-        users_cfg = self.config_manager.peek_users()
-        try:
-            good_count = sum(1 for i in users_cfg.values() if not (i.get("bad") or i.get("cap")) and not i.get("disabled"))
-        except Exception:
-            good_count = 0
-
-        self.total_users_label.setText(str(good_count))
-        self.active_users_label.setText(str(active_users))
-        self.total_processes_label.setText(str(total_processes))
-        self.pending_restarts_label.setText(str(pending_restarts))
-        self._maybe_send_hourly_users_report(good_count, active_users)
-        try:
-            if self.users_tab_index is not None and self.tab_widget.currentIndex() == self.users_tab_index:
-                wt = getattr(self, "worker_thread", None)
-                if wt is not None and wt.isRunning():
-                    self._refresh_users_antiafk_age_column()
-        except Exception:
-            pass
-        try:
-            if getattr(self, "accounts_tab_index", None) is not None and self.tab_widget.currentIndex() == self.accounts_tab_index:
-                users_mtime = float(self.config_manager.get_users_mtime())
-                if users_mtime and users_mtime != float(getattr(self, "_accounts_list_users_mtime", -1.0)):
-                    self.refresh_accounts_list()
-        except Exception:
-            pass
-        try:
-            self._check_multi_instance_process_state()
-        except Exception:
-            pass
+        # "Maintain starting account count": snapshot the healthy headcount now so
+        # the reconcile loop can top it back up from backups whenever it drops.
+        self._maintain_no_backup_warned_at = 0.0
+        # Hold the headcount when EITHER "Maintain starting account count" OR
+        # plain "Enable Auto Replace" is on — users expect auto-replace to keep
+        # the number consistent, not just react to bad/cap flags with a session cap.
+        _maintain_on = bool(
+            (getattr(self, "autorep_maintain_count", None) and self.autorep_maintain_count.isChecked())
+            or (getattr(self, "autorep_enabled", None) and self.autorep_enabled.isChecked())
+        )
+        if _maintain_on:
+            try:
+                ucfg = self.config_manager.peek_users() or {}
+                target = sum(
+                    1 for i in ucfg.values()
+                    if isinstance(i, dict) and not (i.get("bad") or i.get("cap")) and not i.get("disabled") and not i.get("backup")
+                )
+            except Exception:
+                target = 0
+            self._maintain_target = int(target)
+            self._maintain_enabled = True
+            self._autorep_log_msg(f"Maintain count enabled: holding {target} account(s).")
+        else:
+            self._maintain_enabled = False
+            self._maintain_target = 0
 
     def _maybe_send_hourly_users_report(self, total_users: int, active_users: int) -> None:
         try:
@@ -30654,21 +23028,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
     def _is_disconnected_server_label(label: str) -> bool:
         u = str(label or "").strip().upper()
         return u.startswith("DISCONNECTED") or u.startswith("OFFLINE")
-
-    @staticmethod
-    def _format_antiafk_age(age_s: int) -> str:
-        try:
-            s = max(0, int(age_s))
-        except Exception:
-            s = 0
-        if s < 60:
-            return f"{s}s"
-        if s < 3600:
-            m, r = divmod(s, 60)
-            return f"{m}m {r}s"
-        h, r = divmod(s, 3600)
-        m = r // 60
-        return f"{h}h {m}m"
 
     def _restore_antiafk_touch_state_from_resume_state(
         self,
@@ -30854,393 +23213,9 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         except Exception:
             pass
 
-    def _set_users_table_item(self, row: int, col: int, text: str, *, fg: Optional[QColor] = None) -> None:
-        table = getattr(self, "users_table", None)
-        if table is None:
-            return
-        try:
-            item = table.item(row, col)
-            if item is None:
-                item = QTableWidgetItem(str(text))
-                table.setItem(row, col, item)
-            else:
-                s = str(text)
-                if item.text() != s:
-                    item.setText(s)
-            if fg is not None:
-                item.setForeground(fg)
-        except Exception:
-            return
-
-    def refresh_users(self, *_args, force_full: bool = False):
-        table = getattr(self, "users_table", None)
-        if table is None:
-            return
-
-        users_cfg = self.config_manager.peek_users() or {}
-        if not isinstance(users_cfg, dict):
-            users_cfg = {}
-
-        # When the manager isn't running self.user_data is empty; fall back to the
-        # configured accounts so the Users tab shows them (Offline) instead of blank.
-        data_source = self.user_data or {}
-        if not data_source and users_cfg:
-            data_source = {str(uid): {"status": "Offline"} for uid in users_cfg.keys()}
-
-        try:
-            def _uid_sort_key(value: object) -> tuple:
-                s = str(value)
-                try:
-                    return (0, int(s), s)
-                except Exception:
-                    return (1, 0, s)
-
-            ordered = sorted(
-                data_source.items(),
-                key=lambda kv: (
-                    bool(
-                        (users_cfg.get(str(kv[0]), {}) or {}).get("bad", False)
-                        or (users_cfg.get(str(kv[0]), {}) or {}).get("cap", False)
-                    ),
-                    bool((users_cfg.get(str(kv[0]), {}) or {}).get("disabled", False)),
-                    _uid_sort_key(kv[0]),
-                ),
-            )
-        except Exception:
-            ordered = list(data_source.items())
-
-        ordered_uids = [str(uid) for uid, _runtime in ordered]
-        try:
-            row_count_changed = int(table.rowCount()) != len(ordered_uids)
-        except Exception:
-            row_count_changed = True
-
-        order_changed = ordered_uids != (self._users_table_order or [])
-        rebuild = bool(force_full) or bool(order_changed) or bool(row_count_changed)
-        rebuild_widgets = bool(order_changed) or bool(row_count_changed)
-
-        try:
-            table.setUpdatesEnabled(False)
-        except Exception:
-            pass
-
-        try:
-            if rebuild:
-                if row_count_changed:
-                    try:
-                        table.setRowCount(len(ordered_uids))
-                    except Exception:
-                        pass
-                if order_changed or row_count_changed:
-                    self._users_table_order = list(ordered_uids)
-                    self._users_table_row_by_uid = {uid: i for i, uid in enumerate(ordered_uids)}
-
-            now_ts = float(time.time())
-            for row, (user_id, runtime) in enumerate(ordered):
-                uid = str(user_id)
-                runtime = runtime or {}
-
-                u_conf = users_cfg.get(uid, {}) or {}
-                if not isinstance(u_conf, dict):
-                    u_conf = {}
-                bad_flag = bool(u_conf.get("bad", False))
-                cap_flag = bool(u_conf.get("cap", False))
-                disabled_flag = bool(u_conf.get("disabled", False))
-
-                server = str(runtime.get("server", "") or "")
-
-                if rebuild:
-                    username = u_conf.get("username", f"User_{uid}")
-                    ps_link = str(u_conf.get("private_server_link", "") or "")
-                    place = str(u_conf.get("place", "") or "")
-                    trimmed_link = ps_link[:25] + "..." if len(ps_link) > 25 else ps_link
-                    self._set_users_table_item(row, 0, uid)
-                    self._set_users_table_item(row, 1, str(username))
-                    self._set_users_table_item(row, 2, trimmed_link)
-                    self._set_users_table_item(row, 3, place)
-                self._set_users_table_item(row, 4, server)
-
-                if cap_flag:
-                    status_text, colour = "CAP", QColor(ModernStyle.ERROR)
-                elif bad_flag:
-                    status_text, colour = "Bad", QColor(ModernStyle.ERROR)
-                elif disabled_flag:
-                    status_text, colour = "Disabled", QColor(ModernStyle.TEXT_SECONDARY)
-                else:
-                    raw = str(runtime.get("status", "Unknown") or "Unknown")
-                    if "Active" in raw:
-                        colour = QColor(ModernStyle.SECONDARY)
-                    elif "Inactive" in raw:
-                        colour = QColor(ModernStyle.WARNING)
-                    elif "Restarting" in raw:
-                        colour = QColor(ModernStyle.PRIMARY)
-                    else:
-                        colour = QColor(ModernStyle.ERROR)
-                    status_text = raw
-                self._set_users_table_item(row, 5, status_text, fg=colour)
-
-                pids = runtime.get('pids', []) or []
-                if not isinstance(pids, (list, tuple)):
-                    pids = [pids]
-                self._set_users_table_item(row, 6, ', '.join(map(str, pids)) or 'None')
-
-                ttl_list = runtime.get('ttl', []) or []
-                if not isinstance(ttl_list, (list, tuple)):
-                    ttl_list = [ttl_list]
-                self._set_users_table_item(row, 7, ', '.join(f"{t}s" for t in ttl_list) or 'N/A')
-
-                if rebuild:
-                    created_vals: List[str] = []
-                    for pid in (pids or []):
-                        try:
-                            pid_i = int(pid)
-                        except Exception:
-                            continue
-                        pdata = (self.process_data or {}).get(pid_i) or (self.process_data or {}).get(str(pid_i)) or {}
-                        c = str(pdata.get("created", "") or "").strip()
-                        if c:
-                            created_vals.append(c)
-                    created_str = ", ".join(created_vals) if created_vals else "N/A"
-                    self._set_users_table_item(row, 8, created_str)
-
-                last_active_str = "Never"
-                try:
-                    last_active_ts = float(runtime.get('last_active', 0) or 0)
-                    if last_active_ts > 0:
-                        last_active_str = datetime.fromtimestamp(last_active_ts).strftime("%H:%M:%S")
-                except Exception:
-                    last_active_str = "Never"
-                self._set_users_table_item(row, 9, last_active_str)
-
-                dur = None
-                try:
-                    inactive_since = float(runtime.get('inactive_since') or 0)
-                    if inactive_since > 0:
-                        dur = int(now_ts - inactive_since)
-                except Exception:
-                    dur = None
-                self._set_users_table_item(row, 10, f"{dur}s" if dur else "N/A")
-
-                if rebuild:
-                    age_text = "N/A"
-                    try:
-                        if not self._is_disconnected_server_label(server):
-                            with self._antiafk_touch_lock:
-                                last_ts = self._antiafk_last_touch_by_uid.get(uid)
-                            if last_ts is None:
-                                age_text = "0s"
-                            else:
-                                age_text = self._format_antiafk_age(int(now_ts - float(last_ts)))
-                    except Exception:
-                        age_text = "N/A"
-                    self._set_users_table_item(row, 11, age_text)
-
-                try:
-                    if rebuild_widgets or table.cellWidget(row, 12) is None:
-                        actions_widget = QWidget()
-                        actions_layout = QHBoxLayout(actions_widget)
-                        actions_layout.setContentsMargins(6, 4, 6, 4)
-                        actions_layout.setSpacing(6)
-                        actions_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-                        restart_btn = QPushButton("Restart")
-                        restart_btn.clicked.connect(lambda _, uid=uid: self.restart_user_session(uid))
-                        actions_layout.addWidget(restart_btn)
-
-                        kill_btn = QPushButton("Kill")
-                        try:
-                            kill_btn.setProperty("class", "danger")
-                        except Exception:
-                            pass
-                        kill_btn.clicked.connect(lambda _, uid=uid: self.kill_user_processes(uid))
-                        actions_layout.addWidget(kill_btn)
-
-                        table.setCellWidget(row, 12, actions_widget)
-                except Exception:
-                    pass
-
-        finally:
-            try:
-                table.setUpdatesEnabled(True)
-            except Exception:
-                pass
-
-    def _refresh_users_antiafk_age_column(self) -> None:
-        """
-        Update only the Users tab "Anti-AFK Age" column from the local last-touch state.
-        """
-        table = getattr(self, "users_table", None)
-        if table is None:
-            return
-
-        try:
-            row_count = int(table.rowCount())
-        except Exception:
-            return
-
-        now_ts = time.time()
-        try:
-            table.setUpdatesEnabled(False)
-        except Exception:
-            pass
-
-        try:
-            for row in range(row_count):
-                try:
-                    uid_item = table.item(row, 0)
-                    if uid_item is None:
-                        continue
-                    uid = str(uid_item.text() or "").strip()
-                    if not uid:
-                        continue
-
-                    runtime = (self.user_data or {}).get(uid, {}) or {}
-                    server = str(runtime.get("server", "") or "")
-                    if self._is_disconnected_server_label(server):
-                        text = "N/A"
-                    else:
-                        with self._antiafk_touch_lock:
-                            last_ts = self._antiafk_last_touch_by_uid.get(uid)
-                        if last_ts is None:
-                            text = "0s"
-                        else:
-                            text = self._format_antiafk_age(int(now_ts - float(last_ts)))
-
-                    item = table.item(row, 11)
-                    if item is None:
-                        table.setItem(row, 11, QTableWidgetItem(text))
-                    else:
-                        if item.text() != text:
-                            item.setText(text)
-                except Exception:
-                    continue
-        finally:
-            try:
-                table.setUpdatesEnabled(True)
-            except Exception:
-                pass
-
-    def _refresh_users_created_column(self) -> None:
-        """
-        Update only the Users tab "Created" column from the latest per-PID process info.
-        This avoids rebuilding the entire table on every process-signal tick.
-        """
-        table = getattr(self, "users_table", None)
-        if table is None:
-            return
-
-        try:
-            row_count = int(table.rowCount())
-        except Exception:
-            return
-
-        try:
-            table.setUpdatesEnabled(False)
-        except Exception:
-            pass
-
-        try:
-            for row in range(row_count):
-                try:
-                    uid_item = table.item(row, 0)
-                    if uid_item is None:
-                        continue
-                    uid = str(uid_item.text() or "").strip()
-                    if not uid:
-                        continue
-
-                    runtime = (self.user_data or {}).get(uid, {}) or {}
-                    pids = runtime.get("pids", []) or []
-                    if not isinstance(pids, (list, tuple)):
-                        pids = [pids]
-
-                    created_vals: List[str] = []
-                    for pid in (pids or []):
-                        try:
-                            pid_i = int(pid)
-                        except Exception:
-                            continue
-                        pdata = (self.process_data or {}).get(pid_i) or (self.process_data or {}).get(str(pid_i)) or {}
-                        c = str(pdata.get("created", "") or "").strip()
-                        if c:
-                            created_vals.append(c)
-                    created_str = ", ".join(created_vals) if created_vals else "N/A"
-                    self._set_users_table_item(row, 8, created_str)
-                except Exception:
-                    continue
-        finally:
-            try:
-                table.setUpdatesEnabled(True)
-            except Exception:
-                pass
-
     def append_log(self, message: str):
         """Compatibility wrapper so helpers can call parent.append_log()."""
         self.add_log(message)
-
-    def _flush_log_queue(self) -> None:
-        try:
-            q = getattr(self, "_log_queue", None)
-            if not q:
-                return
-
-            log_display = getattr(self, "log_display", None)
-            activity_list = getattr(self, "activity_list", None)
-            if log_display is None or activity_list is None:
-                return
-
-            batch: List[str] = []
-            try:
-                while q and len(batch) < 250:
-                    batch.append(q.popleft())
-            except Exception:
-                return
-
-            if not batch:
-                return
-
-            try:
-                log_display.moveCursor(QTextCursor.MoveOperation.End)
-                log_display.insertPlainText("\n".join(batch) + "\n")
-            except Exception:
-                pass
-
-            try:
-                self._activity_recent.extend(batch)
-                activity_list.setPlainText("\n".join(self._activity_recent))
-            except Exception:
-                pass
-
-            autoscroll = bool(getattr(self, "log_autoscroll", True))
-            try:
-                chk = getattr(self, "auto_scroll_checkbox", None)
-                if chk is not None:
-                    autoscroll = bool(chk.isChecked())
-            except Exception:
-                pass
-            if autoscroll:
-                try:
-                    scrollbar = log_display.verticalScrollBar()
-                    scrollbar.setValue(scrollbar.maximum())
-                except Exception:
-                    pass
-        finally:
-            try:
-                self._flush_ocr_log_queue()
-            except Exception:
-                pass
-            try:
-                self._flush_antiafk_log_queue()
-            except Exception:
-                pass
-            try:
-                self._flush_autoitem_log_queue()
-            except Exception:
-                pass
-            try:
-                self._flush_bes_log_queue()
-            except Exception:
-                pass
 
     def _flush_ocr_log_queue(self) -> None:
         q = getattr(self, "_ocr_log_queue", None)
@@ -31440,180 +23415,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         except Exception:
             pass
 
-    def clear_logs(self):
-        try:
-            self._log_queue.clear()
-            self._activity_recent.clear()
-        except Exception:
-            pass
-        self.log_display.clear()
-        try:
-            self.activity_list.clear()
-        except Exception:
-            pass
-
-    def clear_ocr_log(self) -> None:
-        try:
-            self._ocr_log_queue.clear()
-        except Exception:
-            pass
-        try:
-            self._last_ocr_log = None
-        except Exception:
-            pass
-        try:
-            self.ocr_log_box.clear()
-        except Exception:
-            pass
-
-    def save_logs(self):
-        try:
-            try:
-                self._flush_log_queue()
-            except Exception:
-                pass
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            base_dir = None
-            try:
-                base_dir = Path(self.config_manager.config_dir)
-            except Exception:
-                base_dir = Path.cwd()
-
-            logs_dir = base_dir / "logs"
-            try:
-                logs_dir.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                pass
-
-            file_path = logs_dir / f"jaram_logs_{timestamp}.txt"
-
-            def _box_text(box: Optional[QTextEdit]) -> str:
-                if box is None:
-                    return ""
-                try:
-                    return str(box.toPlainText() or "")
-                except Exception:
-                    return ""
-
-            sections = [
-                ("Main Logs", _box_text(getattr(self, "log_display", None))),
-                ("OCR Log", _box_text(getattr(self, "ocr_log_box", None))),
-                ("Anti-AFK Log", _box_text(getattr(self, "antiafk_status_box", None))),
-                ("Auto-Item Log", _box_text(getattr(self, "autoitem_status_box", None))),
-                ("BES Log", _box_text(getattr(self, "bes_log_box", None))),
-            ]
-
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write("JARAM Logs Export\n")
-                f.write(f"Generated: {timestamp}\n\n")
-                for title, body in sections:
-                    f.write(f"===== {title} =====\n")
-                    if body.strip():
-                        f.write(body.rstrip() + "\n")
-                    f.write("\n")
-
-            QMessageBox.information(self, "Success", f"Logs saved to {file_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save logs: {e}")
-
-    def open_user_management(self):
-        dialog = UserManagementDialog(self)
-        dialog.exec()
-
-    def open_settings(self):
-        idx = self.settings_tab_index if self.settings_tab_index is not None else 5
-        self.tab_widget.setCurrentIndex(idx)
-
-    def _trim_settings_text(self, text: str, limit: int = 80) -> str:
-        text = str(text or "").replace("\r", "").replace("\n", "\\n")
-        if len(text) > limit:
-            return text[: max(0, limit - 3)] + "..."
-        return text
-
-    def _summarize_settings_list(self, value: list) -> str:
-        if not value:
-            return "[]"
-        if all(isinstance(v, dict) for v in value):
-            names = []
-            for v in value:
-                if not isinstance(v, dict):
-                    continue
-                name = v.get("name") or v.get("url") or v.get("id")
-                if name:
-                    names.append(str(name))
-            if names:
-                preview = ", ".join(self._trim_settings_text(n, 24) for n in names[:3])
-                suffix = "" if len(names) <= 3 else f", +{len(names) - 3} more"
-                return f"[{len(value)} items: {preview}{suffix}]"
-            return f"[{len(value)} items]"
-        if all(isinstance(v, (str, int, float, bool)) for v in value):
-            preview_vals = ", ".join(self._trim_settings_text(v, 24) for v in value[:4])
-            suffix = "" if len(value) <= 4 else f", +{len(value) - 4} more"
-            return f"[{preview_vals}{suffix}]"
-        return f"[{len(value)} items]"
-
-    def _format_settings_value(self, value) -> str:
-        if isinstance(value, bool):
-            return "On" if value else "Off"
-        if value is None:
-            return "None"
-        if isinstance(value, (int, float)):
-            return str(value)
-        if isinstance(value, str):
-            return f"\"{self._trim_settings_text(value, 80)}\""
-        if isinstance(value, list):
-            return self._summarize_settings_list(value)
-        if isinstance(value, dict):
-            return f"{{{len(value)} keys}}"
-        return self._trim_settings_text(str(value), 80)
-
-    def _pretty_setting_label(self, path: str) -> str:
-        if not path:
-            return "Settings"
-        label = self._settings_label_map.get(path)
-        if label:
-            return label
-        if path.startswith("launch_priorities."):
-            uid = path.split(".", 1)[1]
-            return f"Launch Priority ({uid})"
-        return path
-
-    def _format_webhook_ref_for_diff(self, url: str, name: str) -> str:
-        url = str(url or "").strip()
-        name = str(name or "").strip()
-        if name and url:
-            return f"{self._trim_settings_text(name, 28)} ({self._trim_settings_text(url, 48)})"
-        return name or self._trim_settings_text(url, 80) or "Webhook"
-
-    def _normalize_webhook_users_for_diff(self, entry: dict) -> Optional[list[str]]:
-        raw_users = entry.get("users", None)
-        explicit = bool(entry.get("users_explicit", raw_users is not None))
-        if not explicit:
-            return None
-        if not isinstance(raw_users, (list, tuple, set)):
-            return []
-        cleaned = [str(u).strip() for u in raw_users if str(u).strip()]
-        return sorted({u for u in cleaned})
-
-    def _format_webhook_users_for_diff(self, users: Optional[list[str]]) -> str:
-        if users is None:
-            return "All users"
-        if not users:
-            return "No users"
-        preview = ", ".join(self._trim_settings_text(u, 16) for u in users[:3])
-        suffix = "" if len(users) <= 3 else f", +{len(users) - 3} more"
-        return f"{len(users)} user(s): {preview}{suffix}"
-
-    def _format_webhook_user_filter_for_diff(self, entry: dict) -> str:
-        mode = _normalize_user_filter_mode((entry or {}).get("user_filter_mode", "whitelist"))
-        users = self._normalize_webhook_users_for_diff(entry or {})
-        if mode == "blacklist":
-            if not users:
-                return "Blacklist: no blocked users"
-            return "Blacklist: " + self._format_webhook_users_for_diff(users)
-        return "Whitelist: " + self._format_webhook_users_for_diff(users)
-
     def _normalize_role_id_for_ping(self, value: object) -> str:
         text = str(value or "").strip()
         if not text:
@@ -31646,396 +23447,11 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             out[key] = source[key]
         return out
 
-    def _format_webhook_role_pings_for_diff(self, pings: dict) -> str:
-        if not pings:
-            return "None"
-        ordered = [str(b).strip().upper() for b in GUI_BIOME_NAMES if str(b).strip()]
-        keys = [b for b in ordered if b in pings]
-        keys.extend(sorted(set(pings.keys()) - set(keys)))
-        parts = [f"{b} <@&{pings[b]}>" for b in keys[:3]]
-        suffix = "" if len(keys) <= 3 else f", +{len(keys) - 3} more"
-        return ", ".join(parts) + suffix
-
-    def _normalize_webhook_biome_modes_for_diff(self, entry: dict) -> dict:
-        modes_raw = entry.get("biome_modes", None)
-        if isinstance(modes_raw, dict) and modes_raw:
-            out = {}
-            for k, v in modes_raw.items():
-                key = str(k).strip().upper()
-                if not key:
-                    continue
-                val = str(v).strip()
-                if val not in ("None", "Message", "Everyone"):
-                    val = val or "None"
-                out[key] = val
-            return out
-        allowed = entry.get("biomes", []) or []
-        allowed_set = {str(b).strip().upper() for b in allowed if str(b).strip()}
-        return {b: "Message" for b in allowed_set}
-
-    def _diff_webhooks_for_changes(self, old_list: list, new_list: list) -> list:
-        def _idx_by_url(items: list) -> dict:
-            out = {}
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                url = str(it.get("url", "") or "").strip()
-                if not url:
-                    continue
-                out.setdefault(url, []).append(it)
-            return out
-
-        old_by_url = _idx_by_url(old_list or [])
-        new_by_url = _idx_by_url(new_list or [])
-        urls = sorted(set(old_by_url.keys()) | set(new_by_url.keys()), key=lambda u: str(u))
-
-        ordered_biomes = [str(b).strip().upper() for b in (GUI_BIOME_NAMES or []) if str(b).strip()]
-        changes = []
-
-        for url in urls:
-            if url not in old_by_url:
-                entry = new_by_url[url][0]
-                changes.append(
-                    f"Webhooks: (added) {self._format_webhook_ref_for_diff(url, entry.get('name', ''))}"
-                )
-                continue
-            if url not in new_by_url:
-                entry = old_by_url[url][0]
-                changes.append(
-                    f"Webhooks: (removed) {self._format_webhook_ref_for_diff(url, entry.get('name', ''))}"
-                )
-                continue
-
-            old = old_by_url[url][0]
-            new = new_by_url[url][0]
-
-            segs = []
-            old_name = str(old.get("name", "") or "").strip()
-            new_name = str(new.get("name", "") or "").strip()
-            if old_name != new_name:
-                segs.append(f"name {self._format_settings_value(old_name)} -> {self._format_settings_value(new_name)}")
-
-            old_user_filter = self._format_webhook_user_filter_for_diff(old)
-            new_user_filter = self._format_webhook_user_filter_for_diff(new)
-            if old_user_filter != new_user_filter:
-                segs.append(f"users {old_user_filter} -> {new_user_filter}")
-
-            old_role_pings = self._normalize_webhook_role_pings_config(old.get("biome_role_pings", {}))
-            new_role_pings = self._normalize_webhook_role_pings_config(new.get("biome_role_pings", {}))
-            if old_role_pings != new_role_pings:
-                segs.append(
-                    "role pings "
-                    f"{self._format_webhook_role_pings_for_diff(old_role_pings)} -> "
-                    f"{self._format_webhook_role_pings_for_diff(new_role_pings)}"
-                )
-
-            old_modes = self._normalize_webhook_biome_modes_for_diff(old)
-            new_modes = self._normalize_webhook_biome_modes_for_diff(new)
-            biome_keys = list(ordered_biomes)
-            extra_keys = sorted({*old_modes.keys(), *new_modes.keys()} - set(biome_keys))
-            biome_keys.extend(extra_keys)
-            changed_biomes = []
-            for b in biome_keys:
-                if (old_modes.get(b, "None") or "None") != (new_modes.get(b, "None") or "None"):
-                    changed_biomes.append(b)
-
-            if changed_biomes:
-                parts = []
-                for b in changed_biomes[:4]:
-                    parts.append(f"{b} {old_modes.get(b, 'None')} -> {new_modes.get(b, 'None')}")
-                suffix = "" if len(changed_biomes) <= 4 else f", +{len(changed_biomes) - 4} more"
-                segs.append(f"biomes {', '.join(parts)}{suffix}")
-
-            if segs:
-                changes.append(
-                    f"Webhook {self._format_webhook_ref_for_diff(url, new_name or old_name)}: " + "; ".join(segs)
-                )
-
-        return changes
-
-    def _diff_settings_values(self, old, new, path: str = "") -> list:
-        changes = []
-        if isinstance(old, dict) and isinstance(new, dict):
-            keys = sorted(set(old.keys()) | set(new.keys()), key=lambda k: str(k))
-            for key in keys:
-                sub_path = f"{path}.{key}" if path else str(key)
-                if key not in old:
-                    changes.append(f"{self._pretty_setting_label(sub_path)}: (added) {self._format_settings_value(new[key])}")
-                    continue
-                if key not in new:
-                    changes.append(f"{self._pretty_setting_label(sub_path)}: (removed) {self._format_settings_value(old[key])}")
-                    continue
-                changes.extend(self._diff_settings_values(old[key], new[key], sub_path))
-            return changes
-
-        if isinstance(old, list) and isinstance(new, list):
-            if old == new:
-                return []
-            if path == "webhooks":
-                return self._diff_webhooks_for_changes(old, new)
-            label = self._pretty_setting_label(path)
-            return [f"{label}: {self._summarize_settings_list(old)} -> {self._summarize_settings_list(new)}"]
-
-        if old != new:
-            label = self._pretty_setting_label(path)
-            changes.append(f"{label}: {self._format_settings_value(old)} -> {self._format_settings_value(new)}")
-        return changes
-
-    def _collect_webhooks_from_ui(self) -> list:
-        try:
-            _users_cfg = self.config_manager.load_users() or {}
-        except Exception:
-            _users_cfg = {}
-        all_user_ids = {str(uid) for uid in _users_cfg.keys()} if isinstance(_users_cfg, dict) else set()
-
-        webhooks = []
-        rows = self.webhooks_table.rowCount()
-        for r in range(rows):
-            name_item = self.webhooks_table.item(r, 0)
-            url_item = self.webhooks_table.item(r, 1)
-            name = (name_item.text().strip() if name_item else "")
-            url = (url_item.text().strip() if url_item else "")
-            if not url:
-                continue
-
-            allowed = []
-            biome_modes = {}
-            data_item = name_item or url_item
-            user_filter = data_item.data(Qt.ItemDataRole.UserRole) if data_item else None
-            user_filter_mode = _normalize_user_filter_mode(
-                data_item.data(WEBHOOK_USER_FILTER_MODE_ROLE) if data_item is not None else "whitelist"
-            )
-            selected_users: list[str] = []
-            explicit_users = False
-            if isinstance(user_filter, (list, tuple, set)):
-                explicit_users = True
-                selected_users = [str(u).strip() for u in user_filter if str(u).strip()]
-                selected_users = sorted({u for u in selected_users})
-                if user_filter_mode == "whitelist" and all_user_ids and set(selected_users) == all_user_ids:
-                    explicit_users = False
-                    selected_users = []
-            if user_filter_mode == "blacklist":
-                explicit_users = True
-
-            for idx, biome_name in enumerate(GUI_BIOME_NAMES):
-                w = self.webhooks_table.cellWidget(r, 2 + idx)
-                cb = None
-                if isinstance(w, QComboBox):
-                    cb = w
-                elif hasattr(w, "findChild"):
-                    cb = w.findChild(QComboBox)
-
-                if cb is not None:
-                    mode = cb.currentText()
-                    if str(biome_name).upper() in HARD_EVERYONE_BIOMES and _bm_lock_enforced():
-                        mode = "Everyone"
-                    biome_modes[str(biome_name).upper()] = mode
-                    if mode in ("Message", "Everyone"):
-                        allowed.append(str(biome_name).upper())
-                elif hasattr(w, "isChecked") and w.isChecked():
-                    allowed.append(str(biome_name).upper())
-
-            entry = {"name": name, "url": url, "biomes": allowed}
-            if biome_modes:
-                entry["biome_modes"] = biome_modes
-            role_pings = self._normalize_webhook_role_pings_config(
-                data_item.data(WEBHOOK_ROLE_PINGS_ROLE) if data_item is not None else {}
-            )
-            if role_pings:
-                entry["biome_role_pings"] = role_pings
-            if explicit_users:
-                entry["users"] = selected_users
-                entry["users_explicit"] = True
-            if user_filter_mode == "blacklist":
-                entry["user_filter_mode"] = "blacklist"
-            webhooks.append(entry)
-
-        return webhooks
-
-    def _get_settings_tab_snapshot(self) -> dict:
-        snapshot = {
-            "window_limit": int(self.settings_window_limit_input.value()),
-            "spares_mode": bool(self.spares_mode_chk.isChecked()),
-            "spares_fraction": str(self.spares_split_cmb.currentText()),
-            "launch_priorities": self._collect_launch_priorities_from_ui(),
-            "roblox_window_geometry": {
-                "enforce_on_launch": bool(self.rbwin_geom_enforce_chk.isChecked()) if hasattr(self, "rbwin_geom_enforce_chk") else False,
-                "x": int((getattr(self, "_roblox_window_geometry", {}) or {}).get("x", 0) or 0),
-                "y": int((getattr(self, "_roblox_window_geometry", {}) or {}).get("y", 0) or 0),
-                "w": int((getattr(self, "_roblox_window_geometry", {}) or {}).get("w", 0) or 0),
-                "h": int((getattr(self, "_roblox_window_geometry", {}) or {}).get("h", 0) or 0),
-            },
-            "roblox_resizer": {
-                "enabled": bool(self.resizer_enable_chk.isChecked()) if hasattr(self, "resizer_enable_chk") else False,
-                "width": int(self.resizer_width_input.value()) if hasattr(self, "resizer_width_input") else 200,
-                "height": int(self.resizer_height_input.value()) if hasattr(self, "resizer_height_input") else 150,
-                "interval": 3,
-            },
-            "timeouts": {
-                "initial_delay": int(self.settings_initial_delay_input.value()),
-                "offline": int(self.settings_offline_threshold_input.value()),
-                "launch_delay": int(self.settings_launch_delay_input.value()),
-                "strap_threshold": int(self.settings_strap_threshold_input.value()),
-                "handoff_lead": int(self.handoff_lead_input.value()),
-                "early_join_window": int(self.early_join_window_input.value()),
-            },
-            "timeout_monitor": {
-                "kill_enabled": bool(self.kill_after_enable_chk.isChecked()),
-                "kill_timeout": int(self.kill_timeout_input.value()),
-                "poll_interval": int(self.poll_interval_input.value()),
-            },
-            "cap_watchdog": {
-                "missing_username_increments_cap": bool(
-                    self.missing_username_cap_count_chk.isChecked()
-                ),
-                "missing_username_timeout_seconds": int(
-                    self.missing_username_timeout_input.value()
-                ),
-                "in_menu_none_increments_cap": bool(
-                    self.in_menu_none_cap_count_chk.isChecked()
-                ),
-                "in_menu_none_timeout_seconds": int(
-                    self.in_menu_none_timeout_input.value()
-                ),
-                "cap_counter_limit": int(self.cap_counter_limit_input.value()),
-            },
-            "alerts": {
-                "webhook_url": str(self.webhook_input.text().strip()),
-                "blackout_ping": str(self.blackout_ping_input.text().strip()),
-                "cap_message": str(self.cap_msg_input.text().strip()),
-                "bad_message": str(self.bad_msg_input.text().strip()) if hasattr(self, "bad_msg_input") else "",
-                "hourly_users_report_enabled": bool(
-                    self.hourly_users_report_chk.isChecked()
-                ) if hasattr(self, "hourly_users_report_chk") else False,
-                "hourly_users_report_interval_hours": int(
-                    self.hourly_users_report_interval_spin.value()
-                ) if hasattr(self, "hourly_users_report_interval_spin") else 1,
-            },
-            "webhooks": self._collect_webhooks_from_ui(),
-            "ui": {
-                "webhooks_hidden_biomes": sorted(
-                    {str(b).strip().upper() for b in (getattr(self, "_webhooks_hidden_biomes", set()) or set()) if str(b).strip()}
-                ),
-                "show_tutorial_menu": bool(self.ui_show_tutorial_menu_chk.isChecked()) if hasattr(self, "ui_show_tutorial_menu_chk") else False,
-                "show_selected_sets_bes_exempt_slot1": bool(
-                    self.ui_show_selected_sets_bes_exempt_slot1_chk.isChecked()
-                ) if hasattr(self, "ui_show_selected_sets_bes_exempt_slot1_chk") else False,
-            },
-            "multiscope": {
-                "merchant_webhook": str(self.ms_merchant_webhook_input.text().strip()) if hasattr(self, "ms_merchant_webhook_input") else "",
-                "player_tracker_webhook": str(self.ms_player_tracker_input.text().strip()) if hasattr(self, "ms_player_tracker_input") else "",
-                "enable_jester": bool(self.ms_enable_jester.isChecked()) if hasattr(self, "ms_enable_jester") else True,
-                "enable_mari": bool(self.ms_enable_mari.isChecked()) if hasattr(self, "ms_enable_mari") else True,
-                "enable_rin": bool(self.ms_enable_rin.isChecked()) if hasattr(self, "ms_enable_rin") else True,
-                "merchant_detection_mode": str(self.ms_merchant_detection_mode.currentData() or "asset_id") if hasattr(self, "ms_merchant_detection_mode") else "asset_id",
-                "jester_ping_type": str(self.ms_jester_type.currentText()) if hasattr(self, "ms_jester_type") else "None",
-                "jester_ping_id": str(self.ms_jester_id.text().strip()) if hasattr(self, "ms_jester_id") else "",
-                "mari_ping_type": str(self.ms_mari_type.currentText()) if hasattr(self, "ms_mari_type") else "None",
-                "mari_ping_id": str(self.ms_mari_id.text().strip()) if hasattr(self, "ms_mari_id") else "",
-                "rin_ping_type": str(self.ms_rin_type.currentText()) if hasattr(self, "ms_rin_type") else "None",
-                "rin_ping_id": str(self.ms_rin_id.text().strip()) if hasattr(self, "ms_rin_id") else "",
-            },
-            "misc": {
-                "skip_webhook_unknown_context": bool(
-                    self.misc_skip_unknown_webhook_chk.isChecked()
-                ) if hasattr(self, "misc_skip_unknown_webhook_chk") else False,
-                "disable_log_based_merchant_detection_when_ocr_merchants_enabled": bool(
-                    self.misc_disable_log_merchants_when_ocr_active_chk.isChecked()
-                ) if hasattr(self, "misc_disable_log_merchants_when_ocr_active_chk") else True,
-                "log_confirmed_launch_mode": bool(
-                    self.misc_log_confirmed_launch_mode_chk.isChecked()
-                ) if hasattr(self, "misc_log_confirmed_launch_mode_chk") else False,
-                "bes_wait_for_username_in_logs": bool(
-                    self.misc_bes_wait_for_username_logs_chk.isChecked()
-                ) if hasattr(self, "misc_bes_wait_for_username_logs_chk") else True,
-                "disable_manager_bad_marking": bool(
-                    self.misc_disable_manager_bad_marking_chk.isChecked()
-                ) if hasattr(self, "misc_disable_manager_bad_marking_chk") else False,
-                "msedgewebview2_limiter_enabled": bool(
-                    self.misc_msedgewebview2_limiter_enabled_chk.isChecked()
-                ) if hasattr(self, "misc_msedgewebview2_limiter_enabled_chk") else True,
-                "hide_discord_tabs": bool(
-                    self.misc_hide_discord_tabs_chk.isChecked()
-                ) if hasattr(self, "misc_hide_discord_tabs_chk") else True,
-                "close_bootstrapper_error_popups": bool(
-                    self.misc_close_bootstrapper_error_popups_chk.isChecked()
-                ) if hasattr(self, "misc_close_bootstrapper_error_popups_chk") else True,
-            },
-        }
-        return snapshot
-
-    def _get_settings_changes(self) -> list:
-        baseline = getattr(self, "_settings_baseline", None)
-        if baseline is None:
-            return []
-        current = self._get_settings_tab_snapshot()
-        return self._diff_settings_values(baseline, current)
-
-    def _format_settings_changes(self, changes: list, max_lines: int = 12) -> tuple[str, str]:
-        if not changes:
-            return ("No changes detected.", "No changes detected.")
-        shown = changes
-        truncated = False
-        if len(changes) > max_lines:
-            shown = changes[:max_lines]
-            shown.append(f"...and {len(changes) - max_lines} more")
-            truncated = True
-        short_text = "\n".join(f"- {c}" for c in shown)
-        full_text = "\n".join(f"- {c}" for c in changes) if truncated else short_text
-        return short_text, full_text
-
-    def _prompt_settings_save(
-        self,
-        title: str,
-        message: str,
-        allow_cancel: bool,
-        changes: Optional[list] = None,
-        no_text: Optional[str] = None,
-    ):
-        if changes is None:
-            changes = self._get_settings_changes()
-        if not changes:
-            return None
-        short_text, full_text = self._format_settings_changes(changes)
-        msg = QMessageBox(self)
-        msg.setWindowTitle(title)
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setText(message)
-        msg.setInformativeText(f"Changes:\n{short_text}")
-        if full_text != short_text:
-            msg.setDetailedText(f"Changes:\n{full_text}")
-        if allow_cancel:
-            msg.setStandardButtons(
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel
-            )
-            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-        else:
-            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-
-        if no_text:
-            try:
-                btn = msg.button(QMessageBox.StandardButton.No)
-                if btn is not None:
-                    btn.setText(str(no_text))
-            except Exception:
-                pass
-        return msg.exec()
-
     def _on_tab_changed(self, new_index: int) -> None:
-        if self._tab_change_guard:
-            return
-        prev_index = self._last_tab_index
         self._last_tab_index = new_index
-
         try:
             if self.users_tab_index is not None and new_index == self.users_tab_index and self._users_table_dirty:
                 self._schedule_users_table_refresh(force_full=True)
-        except Exception:
-            pass
-        try:
-            if self.multiscope_tab_index is not None and new_index == self.multiscope_tab_index and self._multiscope_table_dirty:
-                self._schedule_multiscope_table_refresh(immediate=True)
         except Exception:
             pass
         try:
@@ -32043,50 +23459,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 self.refresh_accounts_list()
         except Exception:
             pass
-
-        if not self._settings_prompt_ready or prev_index is None:
-            return
-        if self.settings_tab_index is None:
-            return
-        if new_index == self.settings_tab_index and prev_index != self.settings_tab_index:
-            try:
-                self._populate_launch_priority_table()
-                self._settings_baseline = self._get_settings_tab_snapshot()
-            except Exception:
-                pass
-            return
-        if prev_index != self.settings_tab_index or new_index == self.settings_tab_index:
-            return
-
-        changes = self._get_settings_changes()
-        if not changes:
-            return
-
-        result = self._prompt_settings_save(
-            title="Unsaved Settings",
-            message="You have unsaved settings changes. Save before leaving Settings?",
-            allow_cancel=True,
-            changes=changes,
-            no_text="Revert",
-        )
-        if result == QMessageBox.StandardButton.Yes:
-            if not self.save_settings(confirm=False):
-                self._tab_change_guard = True
-                try:
-                    self.tab_widget.setCurrentIndex(prev_index)
-                finally:
-                    self._tab_change_guard = False
-                    self._last_tab_index = prev_index
-            return
-        if result == QMessageBox.StandardButton.Cancel:
-            self._tab_change_guard = True
-            try:
-                self.tab_widget.setCurrentIndex(prev_index)
-            finally:
-                self._tab_change_guard = False
-                self._last_tab_index = prev_index
-        if result == QMessageBox.StandardButton.No:
-            self.load_settings_tab()
 
     def _apply_roblox_resizer(self):
         """Shrink every live Roblox window's client (render) area to the set size."""
@@ -32210,7 +23582,14 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self.blackout_ping_input.setText(
             str(alerts.get("blackout_ping") or alerts.get("ping_message") or tm.get("ping_message", "") or "")
         )
+        self.ratelimit_ping_input.setText(str(alerts.get("ratelimit_ping") or ""))
         self.cap_msg_input.setText(str(alerts.get("cap_message") or ""))
+        if hasattr(self, "cap_solved_msg_input"):
+            self.cap_solved_msg_input.setText(str(alerts.get("cap_solved_message") or ""))
+        captcha_cfg = settings.get("captcha_solver", {}) or {}
+        if isinstance(captcha_cfg, dict) and hasattr(self, "settings_solver_api_key"):
+            self.settings_solver_api_key.setText(captcha_cfg.get("api_key", ""))
+            self.settings_solver_provider.setCurrentText(captcha_cfg.get("provider", "YesCaptcha"))
         if hasattr(self, "bad_msg_input"):
             self.bad_msg_input.setText(str(alerts.get("bad_message") or ""))
         hourly_enabled = bool(alerts.get("hourly_users_report_enabled", False))
@@ -32234,7 +23613,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         ui_defaults = self.config_manager.default_settings.get("ui", {}) or {}
         if not isinstance(ui_defaults, dict):
             ui_defaults = {}
-        hidden_biomes = ui.get("webhooks_hidden_biomes", []) or []
         show_tutorial = bool(ui.get("show_tutorial_menu", False))
         show_selected_sets_bes_slot1 = bool(
             ui.get(
@@ -32242,11 +23620,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 ui_defaults.get("show_selected_sets_bes_exempt_slot1", False),
             )
         )
-        if hasattr(self, "_apply_webhook_biome_column_visibility"):
-            try:
-                self._apply_webhook_biome_column_visibility(hidden_biomes)
-            except Exception:
-                pass
         if hasattr(self, "ui_show_tutorial_menu_chk"):
             try:
                 self.ui_show_tutorial_menu_chk.setChecked(show_tutorial)
@@ -32282,6 +23655,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             self.ms_merchant_webhook_input.setText(ms.get("merchant_webhook", ""))
         if hasattr(self, "ms_player_tracker_input"):
             self.ms_player_tracker_input.setText(ms.get("player_tracker_webhook", ""))
+        if hasattr(self, "ms_sinister_webhook_input"):
+            self.ms_sinister_webhook_input.setText(ms.get("sinister_webhook", ""))
 
         if hasattr(self, "ms_enable_jester"):
             self.ms_enable_jester.setChecked(bool(ms.get("enable_jester", True)))
@@ -32289,15 +23664,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             self.ms_enable_mari.setChecked(bool(ms.get("enable_mari", True)))
         if hasattr(self, "ms_enable_rin"):
             self.ms_enable_rin.setChecked(bool(ms.get("enable_rin", True)))
-        if hasattr(self, "ms_merchant_detection_mode"):
-            mode = str(ms.get("merchant_detection_mode", "asset_id") or "asset_id").strip().lower()
-            if mode in {"legacy", "chat", "merchant", "merchant_chat"}:
-                mode = "legacy_chat"
-            idx = self.ms_merchant_detection_mode.findData(mode)
-            if idx < 0:
-                idx = self.ms_merchant_detection_mode.findData("asset_id")
-            if idx >= 0:
-                self.ms_merchant_detection_mode.setCurrentIndex(idx)
 
         if hasattr(self, "ms_jester_type"):
             self.ms_jester_type.setCurrentText(ms.get("jester_ping_type", "None"))
@@ -32336,7 +23702,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         if isinstance(misc, dict) and "msedgewebview2_limiter_enabled" in misc:
             msedge_limiter_enabled = bool(misc.get("msedgewebview2_limiter_enabled", True))
         if isinstance(misc, dict) and "hide_discord_tabs" in misc:
-            hide_discord_tabs = bool(misc.get("hide_discord_tabs", True))
+            hide_discord_tabs = bool(misc.get("hide_discord_tabs", False))
         if isinstance(misc, dict) and "close_bootstrapper_error_popups" in misc:
             close_bootstrapper_error_popups = bool(misc.get("close_bootstrapper_error_popups", True))
         if skip_unknown is None:
@@ -32368,7 +23734,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             )
         if hide_discord_tabs is None:
             hide_discord_tabs = bool(
-                self.config_manager.default_settings.get("misc", {}).get("hide_discord_tabs", True)
+                self.config_manager.default_settings.get("misc", {}).get("hide_discord_tabs", False)
             )
         if close_bootstrapper_error_popups is None:
             close_bootstrapper_error_popups = bool(
@@ -32402,10 +23768,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         # ---------- OCR tab ----------
         self._apply_ocr_settings_to_ui(settings.get("ocr", {}))
-        try:
-            self._settings_baseline = self._get_settings_tab_snapshot()
-        except Exception:
-            self._settings_baseline = None
 
     def _refresh_rbwin_geom_status(self) -> None:
         try:
@@ -32513,11 +23875,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self._roblox_window_geometry = {"x": int(wl), "y": int(wt), "w": int(w), "h": int(h)}
         self._refresh_rbwin_geom_status()
 
-        QMessageBox.information(
-            self,
-            "Recorded",
-            "Roblox window size/position recorded.\n\nClick “Save Settings” to persist this change.",
-        )
+        self.shell.autosave_settings.poke()
+        self.add_log("[Settings] Roblox window size and position recorded and saved.")
 
     def _scrub_config_webhooks(self, cfg):
         """Return a copy of the config with all webhook URLs blanked."""
@@ -32616,31 +23975,13 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             pass
         # Re-run the normal save path so every live-apply hook fires with the imported values.
         try:
-            self.save_settings(confirm=False)
+            self.save_settings()
         except Exception:
             pass
         QMessageBox.information(self, "Import Config", "Config imported and now in use.")
 
-    def save_settings(self, *args, confirm: bool = True):
-        """Collect Settings UI and persist to settings.json, then live-apply."""
-        if confirm:
-            changes = self._get_settings_changes()
-            if not changes:
-                QMessageBox.information(self, "Save Settings", "No changes to save.")
-                return False
-            result = self._prompt_settings_save(
-                title="Save Settings",
-                message="Save the following settings changes?",
-                allow_cancel=True,
-                changes=changes,
-                no_text="Revert",
-            )
-            if result == QMessageBox.StandardButton.No:
-                self.load_settings_tab()
-                return False
-            if result != QMessageBox.StandardButton.Yes:
-                return False
-
+    def save_settings(self, *_args):
+        """Collect the settings controls and persist to settings.json, then live-apply (runs on autosave)."""
         settings = self.config_manager.load_settings()
 
         if not self._save_launch_priorities_from_ui():
@@ -32713,7 +24054,13 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             alerts = {}
         alerts["webhook_url"] = self.webhook_input.text().strip()
         alerts["blackout_ping"] = self.blackout_ping_input.text().strip()
+        alerts["ratelimit_ping"] = self.ratelimit_ping_input.text().strip()
         alerts["cap_message"] = self.cap_msg_input.text().strip()
+        alerts["cap_solved_message"] = self.cap_solved_msg_input.text().strip() if hasattr(self, "cap_solved_msg_input") else ""
+        settings["captcha_solver"] = {
+            "api_key": self.settings_solver_api_key.text().strip() if hasattr(self, "settings_solver_api_key") else "",
+            "provider": self.settings_solver_provider.currentText() if hasattr(self, "settings_solver_provider") else "YesCaptcha",
+        }
         alerts["bad_message"] = self.bad_msg_input.text().strip() if hasattr(self, "bad_msg_input") else ""
         alerts["hourly_users_report_enabled"] = bool(
             self.hourly_users_report_chk.isChecked()
@@ -32734,14 +24081,22 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         # ---------- Webhooks table (tri-mode + legacy-compatible) ----------
         settings["webhooks"] = self._collect_webhooks_from_ui()
 
-        # ---------- UI: Webhooks column visibility ----------
+        # ---------- Roblox Resizer ----------
+        if hasattr(self, "resizer_enable_chk"):
+            rz = dict(settings.get("roblox_resizer") or {})
+            rz.update(
+                enabled=bool(self.resizer_enable_chk.isChecked()),
+                width=int(self.resizer_width_input.value()),
+                height=int(self.resizer_height_input.value()),
+            )
+            rz.pop("interval", None)  # never read; the timer is fixed at 3 s
+            settings["roblox_resizer"] = rz
+
+        # ---------- UI ----------
         ui = settings.get("ui", {}) or {}
         if not isinstance(ui, dict):
             ui = {}
-        hidden = getattr(self, "_webhooks_hidden_biomes", set()) or set()
-        if not isinstance(hidden, (list, tuple, set)):
-            hidden = set()
-        ui["webhooks_hidden_biomes"] = sorted({str(b).strip().upper() for b in hidden if str(b).strip()})
+        ui.pop("webhooks_hidden_biomes", None)  # the biome columns picker is gone
         if hasattr(self, "ui_show_tutorial_menu_chk"):
             ui["show_tutorial_menu"] = bool(self.ui_show_tutorial_menu_chk.isChecked())
         if hasattr(self, "ui_show_selected_sets_bes_exempt_slot1_chk"):
@@ -32756,6 +24111,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             ms["merchant_webhook"] = self.ms_merchant_webhook_input.text().strip()
         if hasattr(self, "ms_player_tracker_input"):
             ms["player_tracker_webhook"] = self.ms_player_tracker_input.text().strip()
+        if hasattr(self, "ms_sinister_webhook_input"):
+            ms["sinister_webhook"] = self.ms_sinister_webhook_input.text().strip()
 
         if hasattr(self, "ms_enable_jester"):
             ms["enable_jester"] = bool(self.ms_enable_jester.isChecked())
@@ -32763,8 +24120,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             ms["enable_mari"]   = bool(self.ms_enable_mari.isChecked())
         if hasattr(self, "ms_enable_rin"):
             ms["enable_rin"]    = bool(self.ms_enable_rin.isChecked())
-        if hasattr(self, "ms_merchant_detection_mode"):
-            ms["merchant_detection_mode"] = str(self.ms_merchant_detection_mode.currentData() or "asset_id")
+        ms.pop("merchant_detection_mode", None)  # asset id is the only detection mode
 
         if hasattr(self, "ms_jester_type"):
             ms["jester_ping_type"] = self.ms_jester_type.currentText()
@@ -32847,7 +24203,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 if isinstance(ui_cfg, dict):
                     self._apply_tutorial_menu_visibility(bool(ui_cfg.get("show_tutorial_menu", False)))
                 self._apply_discord_tabs_visibility(
-                    bool((settings.get("misc", {}) or {}).get("hide_discord_tabs", True))
+                    bool((settings.get("misc", {}) or {}).get("hide_discord_tabs", False))
                 )
             except Exception:
                 pass
@@ -32875,15 +24231,9 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 self._populate_launch_priority_table()
             except Exception:
                 pass
-            QMessageBox.information(self, "Success", "Settings saved and applied!")
-            try:
-                self._settings_baseline = self._get_settings_tab_snapshot()
-            except Exception:
-                self._settings_baseline = None
             return True
-        else:
-            QMessageBox.critical(self, "Error", "Failed to save settings.")
-            return False
+        self.add_log("[Settings] Could not save settings.json; your last change is not saved.")
+        return False
 
 
     def reset_settings(self):
@@ -32913,6 +24263,14 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         self.settings_initial_delay_input.setValue(t["initial_delay"])
         self.settings_launch_delay_input.setValue(t["launch_delay"])
         self.settings_offline_threshold_input.setValue(t["offline"])
+        self.handoff_lead_input.setValue(int(t.get("handoff_lead", 25)))
+        self.early_join_window_input.setValue(int(t.get("early_join_window", 90)))
+        self.spares_mode_chk.setChecked(bool(defaults.get("spares_mode", False)))
+        self.spares_split_cmb.setCurrentText(str(defaults.get("spares_fraction", "1/2")))
+        rz = defaults.get("roblox_resizer", {}) or {}
+        self.resizer_width_input.setValue(int(rz.get("width", 200)))
+        self.resizer_height_input.setValue(int(rz.get("height", 150)))
+        self.resizer_enable_chk.setChecked(bool(rz.get("enabled", False)))
 
         # ── helper / strap limiter ────────────────────────────────
         self.settings_strap_threshold_input.setValue(t["strap_threshold"])
@@ -32921,6 +24279,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         tm = defaults.get("timeout_monitor", {}) or {}
         if not isinstance(tm, dict):
             tm = {}
+        self.kill_after_enable_chk.setChecked(bool(tm.get("kill_enabled", False)))
         self.kill_timeout_input.setValue(int(tm.get("kill_timeout", t.get("kill_timeout", 1740))))
         self.poll_interval_input.setValue(int(tm.get("poll_interval", t.get("poll_interval", 10))))
 
@@ -32942,11 +24301,17 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         alerts = defaults.get("alerts", {}) or {}
         if not isinstance(alerts, dict):
             alerts = {}
-        self.webhook_input.setText(str(alerts.get("webhook_url", t.get("webhook_url", ""))))
+        # The alert webhook URL is kept, like the biome webhooks.
         self.blackout_ping_input.setText(
             str(alerts.get("blackout_ping", alerts.get("ping_message", t.get("ping_message", ""))))
         )
+        self.ratelimit_ping_input.setText(str(alerts.get("ratelimit_ping", "") or ""))
         self.cap_msg_input.setText(str(alerts.get("cap_message", "")))
+        if hasattr(self, "cap_solved_msg_input"):
+            self.cap_solved_msg_input.setText(str(alerts.get("cap_solved_message", "")))
+        if hasattr(self, "settings_solver_api_key"):
+            self.settings_solver_api_key.setText("")
+            self.settings_solver_provider.setCurrentText("YesCaptcha")
         if hasattr(self, "bad_msg_input"):
             self.bad_msg_input.setText(str(alerts.get("bad_message", "")))
         hourly_enabled = bool(alerts.get("hourly_users_report_enabled", False))
@@ -33022,7 +24387,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 bool(defaults.get("misc", {}).get("msedgewebview2_limiter_enabled", True))
             )
         if hasattr(self, "misc_hide_discord_tabs_chk"):
-            hide_discord_tabs = bool(defaults.get("misc", {}).get("hide_discord_tabs", True))
+            hide_discord_tabs = bool(defaults.get("misc", {}).get("hide_discord_tabs", False))
             self.misc_hide_discord_tabs_chk.setChecked(hide_discord_tabs)
             self._apply_discord_tabs_visibility(hide_discord_tabs)
         if hasattr(self, "misc_close_bootstrapper_error_popups_chk"):
@@ -33030,208 +24395,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 bool(defaults.get("misc", {}).get("close_bootstrapper_error_popups", True))
             )
 
-        QMessageBox.information(
-            self,
-            "Reset Complete",
-            "All settings have been restored to their default values.\n"
-            "Click “Save Settings” to confirm them."
-        )
-
-    def _clear_bad_flags(self):
-        self._clear_all_account_flags()
-
-    def _clear_all_cap_flags(self):
-        self._clear_all_account_flags("cap")
-
-    def _clear_all_bad_flags(self):
-        self._clear_all_account_flags("bad")
-
-    def _clear_all_account_flags(self, flag_type: Optional[str] = None):
-        flag_type = str(flag_type or "").strip().lower()
-        if flag_type not in ("", "bad", "cap"):
-            return
-
-        users = self.config_manager.load_users()
-        flags_to_clear = (flag_type,) if flag_type else ("bad", "cap")
-        affected = sum(
-            1
-            for info in users.values()
-            if isinstance(info, dict) and any(bool(info.get(flag, False)) for flag in flags_to_clear)
-        )
-        flag_label = flag_type.upper() if flag_type else "BAD and CAP"
-
-        if affected == 0:
-            QMessageBox.information(self, "No Changes", f"No accounts have {flag_label} flags set.")
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "Confirm Clear Flags",
-            f"Clear all {flag_label} flags from {affected} account(s)?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        for info in users.values():
-            if not isinstance(info, dict):
-                continue
-            for flag in flags_to_clear:
-                info[flag] = False
-
-        if not self.config_manager.save_users(users):
-            err = self.config_manager.get_cookie_error()
-            msg = "Failed to save users.json."
-            if err:
-                msg += "\n\n" + err
-            QMessageBox.critical(self, "Error", msg)
-            return
-
-        QMessageBox.information(self, "Done", f"Cleared all {flag_label} flags from {affected} account(s).")
-        self.refresh_users()                # live update
-        self.refresh_accounts_list()
-        self.load_settings_tab()            # if you show counts here
-
-    def _clear_selected_bad_flags(self):
-        table = getattr(self, "accounts_list", None)
-        user_ids = self._get_selected_user_ids(table)
-        if not user_ids:
-            QMessageBox.information(self, "Select Accounts", "Select one or more account rows first.")
-            return
-
-        users = self.config_manager.load_users()
-        changed = 0
-        for uid in user_ids:
-            info = users.get(uid)
-            if not isinstance(info, dict):
-                continue
-            had_flag = bool(info.get("bad", False) or info.get("cap", False))
-            if had_flag:
-                info["bad"] = False
-                info["cap"] = False
-                changed += 1
-
-        if changed == 0:
-            QMessageBox.information(self, "No Changes", "No selected accounts have flags set.")
-            return
-
-        if self.config_manager.save_users(users):
-            QMessageBox.information(self, "Done", f"Cleared flags for {changed} account(s).")
-            self.refresh_users()
-            self.refresh_accounts_list()
-            self.load_settings_tab()
-        else:
-            err = self.config_manager.get_cookie_error()
-            msg = "Failed to save users.json."
-            if err:
-                msg = msg + "\n\n" + err
-            QMessageBox.critical(self, "Error", msg)
-
-    def show_config_location(self):
-        config_info = self.config_manager.get_config_info()
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Configuration Location")
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.setText("JARAM Configuration Files")
-        msg.setDetailedText(
-            f"Configuration Directory:\n{config_info['config_dir']}\n\n"
-            f"Users File:\n{config_info['users_file']}\n\n"
-            f"Settings File:\n{config_info['settings_file']}\n\n"
-            f"Backups Directory:\n{config_info['backup_dir']}\n\n"
-            "All configuration files are automatically backed up before changes."
-        )
-
-        open_button = msg.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
-        msg.addButton(QMessageBox.StandardButton.Ok)
-
-        msg.exec()
-
-        if msg.clickedButton() == open_button:
-            try:
-                os.startfile(config_info['config_dir'])
-            except Exception as e:
-                QMessageBox.warning(self, "Error", f"Failed to open folder: {e}")
-
-    # ── Update check ──────────────────────────────────────────────────────
-    def _start_update_check(self, on_done=None):
-        """Run one check in the background. on_done(rel_or_None) when finished."""
-        if getattr(self, "_update_thread", None) is not None and self._update_thread.isRunning():
-            return False
-        thread = UpdateCheckThread(self)
-        self._update_thread = thread
-        thread.found.connect(self._on_update_found)
-        if on_done is not None:
-            # `found` never fires when there is nothing new, so pair it with
-            # `finished` to give the manual path an "up to date" answer too.
-            hit = {"rel": None}
-            thread.found.connect(lambda tag, url: hit.update(rel=(tag, url)))
-            thread.finished.connect(lambda: on_done(hit["rel"]))
-        thread.start()
-        return True
-
-    def check_for_updates_startup(self):
-        """Silent: only speaks up when there is actually a newer release."""
-        try:
-            self._start_update_check()
-        except Exception:
-            pass
-
-    def check_for_updates_manual(self):
-        """User-initiated, so also say something when there is nothing new.
-
-        The "update available" dialog is raised by _on_update_found, which runs
-        for both the startup and manual checks, so this only covers the
-        up-to-date case -- otherwise a manual check would pop two dialogs.
-        """
-        from version import __version__
-
-        def _done(rel):
-            if not rel:
-                QMessageBox.information(
-                    self, "No Updates",
-                    f"You are running the latest version ({__version__}).",
-                )
-
-        if not self._start_update_check(_done):
-            QMessageBox.information(self, "Check for Updates", "A check is already running.")
-
-    def _on_update_found(self, tag: str, url: str):
-        from version import __version__
-
-        self._update_url = url
-        if hasattr(self, "_update_menu_action"):
-            self._update_menu_action.setText(f"Update available: {tag}")
-            self._update_menu_action.setVisible(True)
-        try:
-            self.add_log(f"[Update] {tag} is available - {url}")
-        except Exception:
-            pass
-
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setWindowTitle("Update Available")
-        box.setText(f"M.J.JARAM {tag} is available.\n\nYou are running {__version__}.")
-        open_btn = box.addButton("Open Release Page", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is open_btn:
-            self.open_url(url)
-
-    def _open_update_url(self):
-        if getattr(self, "_update_url", ""):
-            self.open_url(self._update_url)
-
-    def show_about(self):
-        config_info = self.config_manager.get_config_info()
-        QMessageBox.about(self, "About M.J.JARAM",
-                         f"M.J.JARAM (Jirach1's Just Another Roblox Account Manager) JX {__version__}\n\n"
-                         "Advanced multi-account Roblox session manager\n"
-                         "with automated log based monitoring and process management.\n\n"
-                         "Built with PySide6 and modern design principles.\n\n"
-                         "https://github.com/Jirach-1/J.JARAM\n\n"
-                         f"Configuration stored in:\n{config_info['config_dir']}")
+        self.shell.autosave_settings.poke()
+        QMessageBox.information(self, "Settings reset", "Every setting is back to its default and saved.")
 
     def _queue_worker_action(self, action_name: str, *args, **kwargs) -> bool:
         wt = getattr(self, "worker_thread", None)
@@ -33392,14 +24557,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             self._stopped_worker_state = None
             self.add_log("[UI] No Roblox processes found to kill.")
 
-    def cleanup_processes(self):
-        if not self.worker_thread or not self.worker_thread.isRunning():
-            QMessageBox.warning(self, "Manager Not Running", "Please start the manager first.")
-            return
-
-        if not self._queue_worker_action("cleanup_dead_processes"):
-            QMessageBox.warning(self, "Cleanup Failed", "Failed to queue cleanup action.")
-
     def restart_user_session(self, user_id):
         if not self.worker_thread or not self.worker_thread.isRunning():
             QMessageBox.warning(self, "Manager Not Running", "Please start the manager first.")
@@ -33411,20 +24568,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             QMessageBox.warning(self, "Restart Failed", "Failed to queue restart action.")
 
     # ---------------- Accounts tab helpers ----------------
-    def _infer_account_server_type(self, user_info: dict) -> str:
-        if not isinstance(user_info, dict):
-            return "private"
-        raw = str(user_info.get("server_type", "") or "").strip().lower()
-        if raw in ("private", "public"):
-            return raw
-        private_link = str(user_info.get("private_server_link", "") or "").strip()
-        place = str(user_info.get("place", "") or user_info.get("place_id", "") or "").strip()
-        if private_link:
-            return "private"
-        if place:
-            return "public"
-        return "private"
-
     def _confirm_account_server_warning(self, server_type: str, place_id: str) -> bool:
         if server_type == "public":
             if self.skip_account_public_place_warning:
@@ -33597,13 +24740,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         finally:
             self._reset_account_browser_button()
 
-    def _reset_account_browser_button(self):
-        btn = getattr(self, "account_browser_login_btn", None)
-        if btn is not None:
-            alternate = bool(getattr(self, "account_alternate_launch", None) and self.account_alternate_launch.isChecked())
-            btn.setEnabled(not alternate)
-            btn.setText("Login with Browser")
-
     def _on_account_alternate_launch_toggled(self, checked: bool) -> None:
         checked = bool(checked)
         try:
@@ -33618,52 +24754,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 btn.setToolTip("Disabled: Alternate launch mode does not use cookies." if checked else "Open browser to login and automatically extract cookie")
         except Exception:
             pass
-
-    def on_account_server_type_changed(self):
-        if self.account_private_radio.isChecked():
-            if hasattr(self, "account_private_link_label"):
-                self.account_private_link_label.show()
-            self.account_private_link.setEnabled(True)
-            self.account_private_link.show()
-            self.account_place_id_label.hide()
-            self.account_place_id.hide()
-        else:
-            if hasattr(self, "account_private_link_label"):
-                self.account_private_link_label.hide()
-            self.account_private_link.setEnabled(False)
-            self.account_private_link.hide()
-            self.account_place_id_label.show()
-            self.account_place_id.show()
-
-    def clear_account_form(self):
-        self.account_user_id.clear()
-        self.account_username.clear()
-        self.account_private_link.clear()
-        self.account_place_id.clear()
-        self.account_cookie.clear()
-        self.account_disabled.setChecked(False)
-        try:
-            self.account_alternate_launch.setChecked(False)
-        except Exception:
-            pass
-        try:
-            self.account_skip_reconnect_on_log_disconnect.setChecked(False)
-        except Exception:
-            pass
-        self.account_private_radio.setChecked(True)
-        self.on_account_server_type_changed()
-        try:
-            self._on_account_alternate_launch_toggled(False)
-        except Exception:
-            pass
-        self.account_user_id.setEnabled(True)
-        if self.add_account_btn.text() != "Add Account":
-            self.add_account_btn.setText("Add Account")
-        try:
-            self.add_account_btn.clicked.disconnect()
-        except Exception:
-            pass
-        self.add_account_btn.clicked.connect(self.add_account)
 
     def add_account(self):
         user_id = self.account_user_id.text().strip()
@@ -33726,290 +24816,12 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         }
         users_config[user_id] = account_data
         if self.config_manager.save_users(users_config):
-            QMessageBox.information(self, "Success", f"Account {user_id} ({username}) added successfully!")
+            QMessageBox.information(self, "Account added", f"Added {username} ({user_id}).")
             self.clear_account_form()
             self.refresh_accounts_list()
             self.refresh_users()
         else:
             QMessageBox.critical(self, "Error", "Failed to save account!")
-
-    def refresh_accounts_list(self):
-        users_config = self.config_manager.load_users()
-        query = ""
-        try:
-            if hasattr(self, "accounts_search_input"):
-                query = str(self.accounts_search_input.text() or "").strip().lower()
-        except Exception:
-            query = ""
-        items = [
-            (uid, info) for uid, info in users_config.items()
-            if not query
-            or query in str(uid).lower()
-            or query in str((info.get("username") if isinstance(info, dict) else "") or f"User_{uid}").lower()
-        ]
-        self.accounts_list.setRowCount(len(items))
-        for row, (user_id, user_info) in enumerate(items):
-            if isinstance(user_info, dict):
-                username = user_info.get("username", f"User_{user_id}")
-                server_type = self._infer_account_server_type(user_info)
-                disabled = user_info.get("disabled", False)
-                bad_flag = user_info.get("bad", False)
-                cap_flag = user_info.get("cap", False)
-                is_alternate = bool(user_info.get("alternate_launch", False))
-            else:
-                username = f"User_{user_id}"
-                server_type = "private"
-                disabled = False
-                bad_flag = False
-                cap_flag = False
-                is_alternate = False
-            last_launch = user_info.get("last_launch", 0.0) if isinstance(user_info, dict) else 0.0
-
-            self.accounts_list.setItem(row, 0, QTableWidgetItem(user_id))
-            username_item = QTableWidgetItem(username)
-            if is_alternate:
-                username_item.setForeground(QColor("#f1c40f"))
-            self.accounts_list.setItem(row, 1, username_item)
-            self.accounts_list.setItem(row, 2, QTableWidgetItem(server_type.title()))
-
-            status_text = "Disabled" if disabled else "Enabled"
-            flags = []
-            if bad_flag:
-                flags.append("bad")
-            if cap_flag:
-                flags.append("CAP")
-            if flags:
-                status_text = f"{status_text} ({'/'.join(flags)})"
-            status_item = QTableWidgetItem(status_text)
-            if disabled:
-                status_item.setForeground(QColor("#FF6666"))
-            elif bad_flag or cap_flag:
-                status_item.setForeground(QColor(ModernStyle.ERROR))
-            else:
-                status_item.setForeground(QColor("#66FF66"))
-            status_item.setData(_ACTIVITY_TIMESTAMP_ROLE, _coerce_activity_timestamp(last_launch))
-            status_item.setToolTip(f"{status_text}\n\n{_activity_tooltip(last_launch)}")
-            self.accounts_list.setItem(row, 3, status_item)
-
-            edit_btn = QPushButton("Edit")
-            edit_btn.setStyleSheet(
-                "QPushButton {background-color:%s; color:white; border:none; padding:2px 4px; border-radius:3px; font-size:8px; font-weight:bold; min-width:50px; max-width:80px; min-height:18px; max-height:22px;} QPushButton:hover {background-color:%s;}"
-                % (ModernStyle.PRIMARY, ModernStyle.PRIMARY_VARIANT)
-            )
-            edit_btn.clicked.connect(lambda _, uid=user_id: self.edit_account(uid))
-            self.accounts_list.setCellWidget(row, 4, edit_btn)
-
-            delete_btn = QPushButton("Del")
-            delete_btn.setStyleSheet(
-                "QPushButton {background-color:#f44336; color:white; border:none; padding:2px 4px; border-radius:3px; font-size:8px; font-weight:bold; min-width:40px; max-width:70px; min-height:18px; max-height:22px;} QPushButton:hover {background-color:#da190b;}"
-            )
-            delete_btn.clicked.connect(lambda _, uid=user_id: self.delete_account(uid))
-            self.accounts_list.setCellWidget(row, 5, delete_btn)
-        try:
-            self._accounts_list_users_mtime = float(self.config_manager.get_users_mtime())
-        except Exception:
-            self._accounts_list_users_mtime = 0.0
-        try:
-            self._refresh_discord_control_accounts_table()
-        except Exception:
-            pass
-
-    def edit_account(self, user_id):
-        users_config = self.config_manager.load_users()
-        user_info = users_config.get(user_id, {})
-        if not isinstance(user_info, dict):
-            return
-        self.account_user_id.setText(user_id)
-        self.account_user_id.setEnabled(False)
-        self.account_username.setText(user_info.get("username", f"User_{user_id}"))
-        self.account_private_link.setText(user_info.get("private_server_link", ""))
-        place = user_info.get("place", "") or user_info.get("place_id", "")
-        self.account_place_id.setText(place)
-        self.account_cookie.setText(user_info.get("cookie", ""))
-        self.account_disabled.setChecked(user_info.get("disabled", False))
-        try:
-            self.account_alternate_launch.setChecked(bool(user_info.get("alternate_launch", False)))
-        except Exception:
-            pass
-        try:
-            self.account_skip_reconnect_on_log_disconnect.setChecked(
-                bool(user_info.get("skip_reconnect_on_log_disconnect", False))
-            )
-        except Exception:
-            pass
-        server_type = self._infer_account_server_type(user_info)
-        if server_type == "public":
-            self.account_public_radio.setChecked(True)
-        else:
-            self.account_private_radio.setChecked(True)
-        self.on_account_server_type_changed()
-        try:
-            self._on_account_alternate_launch_toggled(bool(getattr(self, "account_alternate_launch", None) and self.account_alternate_launch.isChecked()))
-        except Exception:
-            pass
-        self.add_account_btn.setText("Update Account")
-        try:
-            self.add_account_btn.clicked.disconnect()
-        except Exception:
-            pass
-        self.add_account_btn.clicked.connect(lambda: self.update_account(user_id))
-
-    def update_account(self, user_id):
-        if self.config_manager.cookie_encryption_enabled() and not self.config_manager.is_cookie_unlocked():
-            QMessageBox.warning(
-                self,
-                "Cookies Locked",
-                "Cookie encryption is enabled and cookies are currently locked.\n\n"
-                "Accounts can't be updated until cookies are unlocked.\n\n"
-                "Use File -> Cookie Encryption... -> Unlock Cookies.",
-            )
-            return
-
-        username = self.account_username.text().strip() or f"User_{user_id}"
-        private_link = self.account_private_link.text().strip()
-        place = self.account_place_id.text().strip()
-        cookie = self.account_cookie.text().strip()
-        disabled = self.account_disabled.isChecked()
-        alternate = bool(getattr(self, "account_alternate_launch", None) and self.account_alternate_launch.isChecked())
-        skip_reconnect_on_log_disconnect = bool(
-            getattr(self, "account_skip_reconnect_on_log_disconnect", None)
-            and self.account_skip_reconnect_on_log_disconnect.isChecked()
-        )
-        server_type = "private" if self.account_private_radio.isChecked() else "public"
-
-        if (not alternate) and (not cookie):
-            QMessageBox.warning(self, "Error", "Cookie is required!")
-            return
-        if server_type == "private" and not private_link:
-            if not self._confirm_account_server_warning("private", place):
-                self.account_private_link.setFocus()
-                return
-        if server_type == "public" and not place:
-            if not self._confirm_account_server_warning("public", place):
-                self.account_place_id.setFocus()
-                return
-
-        users_config = self.config_manager.load_users()
-        existing = users_config.get(user_id, {})
-        if not isinstance(existing, dict):
-            existing = {}
-
-        existing_cookie = str(existing.get("cookie", "") or "")
-        cookie_changed = str(cookie or "") != existing_cookie
-        bad_flag = bool(existing.get("bad", False))
-        if cookie_changed and bad_flag:
-            bad_flag = False
-
-        if alternate:
-            if not self._confirm_account_alternate_switch(users_config, user_id):
-                return
-            for uid, info in (users_config or {}).items():
-                if str(uid) == str(user_id):
-                    continue
-                if not isinstance(info, dict):
-                    continue
-                info["alternate_launch"] = False
-                users_config[uid] = info
-
-        account_data = {
-            "username": username,
-            "server_type": server_type,
-            "private_server_link": private_link if server_type == "private" else "",
-            "place": place if server_type == "public" else "",
-            "cookie": cookie,
-            "last_launch": _coerce_activity_timestamp(existing.get("last_launch", 0.0)),
-            "disabled": disabled,
-            "bad": bad_flag,
-            "cap": existing.get("cap", False),
-            "alternate_launch": alternate,
-            "launch_priority": coerce_launch_priority(existing.get("launch_priority", DEFAULT_LAUNCH_PRIORITY)),
-            "skip_reconnect_on_log_disconnect": skip_reconnect_on_log_disconnect,
-            "discord_user_ids": normalize_discord_ids(existing.get("discord_user_ids")),
-        }
-        users_config[user_id] = account_data
-        if self.config_manager.save_users(users_config):
-            QMessageBox.information(self, "Success", f"Account {user_id} ({username}) updated successfully!")
-            self.clear_account_form()
-            self.account_user_id.setEnabled(True)
-            self.add_account_btn.setText("Add Account")
-            try:
-                self.add_account_btn.clicked.disconnect()
-            except Exception:
-                pass
-            self.add_account_btn.clicked.connect(self.add_account)
-            self.refresh_accounts_list()
-            self.refresh_users()
-        else:
-            err = self.config_manager.get_cookie_error()
-            QMessageBox.critical(self, "Error", err or "Failed to update account!")
-
-    def delete_account(self, user_id):
-        reply = QMessageBox.question(
-            self,
-            "Confirm Delete",
-            f"Are you sure you want to delete account {user_id}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        users_config = self.config_manager.load_users()
-        if user_id in users_config:
-            users_config.pop(user_id, None)
-            if self.config_manager.save_users(users_config):
-                QMessageBox.information(self, "Success", f"Account {user_id} deleted successfully!")
-                self.refresh_accounts_list()
-                self.refresh_users()
-            else:
-                QMessageBox.critical(self, "Error", "Failed to delete account!")
-
-    def toggle_user_enabled(self, user_id):
-        """Toggle the disabled flag for an account and refresh UI."""
-        try:
-            users_config = self.config_manager.load_users()
-            if user_id not in users_config:
-                QMessageBox.warning(self, "Error", f"Account {user_id} not found.")
-                return False
-            info = users_config[user_id]
-            if not isinstance(info, dict):
-                QMessageBox.warning(self, "Error", "Cannot modify legacy account format. Please update account configuration.")
-                return False
-            info["disabled"] = not info.get("disabled", False)
-            if self.config_manager.save_users(users_config):
-                if info["disabled"] and self.worker_thread and self.worker_thread.isRunning():
-                    self._queue_worker_action("kill_user_processes", user_id)
-                self.refresh_users()
-                status = "disabled" if info["disabled"] else "enabled"
-                QMessageBox.information(self, "Account Status Changed", f"Account {user_id} has been {status}.")
-                return True
-            QMessageBox.critical(self, "Error", "Failed to save account configuration.")
-            return False
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to toggle account status: {e}")
-            return False
-
-    def toggle_user_enabled(self, user_id):
-        try:
-            users_config = self.config_manager.load_users()
-            if user_id not in users_config:
-                QMessageBox.warning(self, "Error", f"Account {user_id} not found.")
-                return False
-            user_info = users_config[user_id]
-            if not isinstance(user_info, dict):
-                QMessageBox.warning(self, "Error", "Cannot modify legacy account format. Please update account configuration.")
-                return False
-            user_info["disabled"] = not user_info.get("disabled", False)
-            if self.config_manager.save_users(users_config):
-                if user_info["disabled"] and self.worker_thread and self.worker_thread.isRunning():
-                    self._queue_worker_action("kill_user_processes", user_id)
-                self.refresh_users()
-                status = "disabled" if user_info["disabled"] else "enabled"
-                QMessageBox.information(self, "Account Status Changed", f"Account {user_id} has been {status}.")
-                return True
-            QMessageBox.critical(self, "Error", "Failed to save account configuration.")
-            return False
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to toggle account status: {e}")
-            return False
 
     def _get_selected_user_ids(self, table=None) -> List[str]:
         if table is None:
@@ -34045,6 +24857,710 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             return "Accounts"
         return "Users"
 
+    def set_solver_for_selected(self, table=None, enabled: bool = True):
+        if table is None:
+            table = getattr(self, "accounts_list", None)
+        user_ids = self._get_selected_user_ids(table)
+        if not user_ids:
+            label = self._selection_label_for_table(table)
+            QMessageBox.information(self, f"Select {label}", f"Select one or more {label.lower()} rows first.")
+            return
+        users_config = self.config_manager.load_users()
+        changed = 0
+        for uid in user_ids:
+            info = users_config.get(uid)
+            if not isinstance(info, dict):
+                continue
+            if bool(info.get("solver_enabled", True)) != bool(enabled):
+                info["solver_enabled"] = bool(enabled)
+                changed += 1
+        state = "enabled" if enabled else "disabled"
+        if changed == 0:
+            QMessageBox.information(self, "No Changes", f"Solver already {state} for the selected account(s).")
+            return
+        if self.config_manager.save_users(users_config):
+            self.refresh_accounts_list()
+            self.refresh_users()
+            QMessageBox.information(self, "Captcha Solver", f"Solver {state} for {changed} account(s).")
+        else:
+            QMessageBox.critical(self, "Error", "Failed to save account configuration.")
+
+    def set_backup_for_selected(self, table=None, backup: bool = True):
+        """Mark selected accounts as backup (held in reserve) or normal.
+
+        A backup account is disabled so JARAM never launches it; Auto Replace
+        promotes it (back to normal) when a replacement is needed.
+        """
+        if table is None:
+            table = getattr(self, "accounts_list", None)
+        user_ids = self._get_selected_user_ids(table)
+        if not user_ids:
+            label = self._selection_label_for_table(table)
+            QMessageBox.information(self, f"Select {label}", f"Select one or more {label.lower()} rows first.")
+            return
+        users_config = self.config_manager.load_users()
+        changed = 0
+        for uid in user_ids:
+            info = users_config.get(uid)
+            if not isinstance(info, dict):
+                continue
+            if bool(info.get("backup", False)) != bool(backup):
+                info["backup"] = bool(backup)
+                info["disabled"] = bool(backup)  # backup accounts are held out of launch
+                changed += 1
+        state = "backup" if backup else "normal"
+        if changed == 0:
+            QMessageBox.information(self, "No Changes", f"Selected account(s) already {state}.")
+            return
+        if self.config_manager.save_users(users_config):
+            if backup and self.worker_thread and self.worker_thread.isRunning():
+                for uid in user_ids:
+                    self._queue_worker_action("kill_user_processes", uid)
+            self.refresh_accounts_list()
+            self.refresh_users()
+            QMessageBox.information(self, "Backup Accounts", f"Marked {changed} account(s) as {state}.")
+        else:
+            QMessageBox.critical(self, "Error", "Failed to save account configuration.")
+
+    # ── BloxGen ────────────────────────────────────────────────────────
+    def _bloxgen_load_config(self) -> dict:
+        try:
+            return dict((self.config_manager.load_settings() or {}).get("bloxgen") or {})
+        except Exception:
+            return {}
+
+    def _bloxgen_keys(self) -> list:
+        """Parsed, de-duplicated API keys, one per line (commas also accepted)."""
+        raw = self.bloxgen_api_keys.toPlainText()
+        seen, out = set(), []
+        for line in raw.replace(",", "\n").splitlines():
+            k = line.strip()
+            if k and k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out
+
+    def _bloxgen_save_config(self) -> None:
+        try:
+            settings = self.config_manager.load_settings() or {}
+            settings["bloxgen"] = {
+                "api_keys": self._bloxgen_keys(),
+                "plan": self.bloxgen_plan.currentText().lower(),
+                "types": [t for t, cb in self.bloxgen_type_checks.items() if cb.isChecked()],
+                "region": self.bloxgen_region.currentText().strip(),
+                "universe_id": self.bloxgen_universe.text().strip(),
+                "count": int(self.bloxgen_count.value()),
+                "add_disabled": bool(self.bloxgen_disabled.isChecked()),
+                "globalize_cookies": bool(self.bloxgen_globalize.isChecked()),
+            }
+            self.config_manager.save_settings(settings)
+        except Exception:
+            pass
+
+    def _bloxgen_apply_plan(self) -> None:
+        """Enable only the account types the selected plan can generate, and gate region."""
+        plan = self.bloxgen_plan.currentText().lower()
+        allowed = set(bloxgen_allowed_types(plan))
+        for t, cb in self.bloxgen_type_checks.items():
+            ok = t in allowed
+            cb.setEnabled(ok)
+            if not ok:
+                cb.setChecked(False)
+        region_ok = bloxgen_region_allowed(plan)
+        self.bloxgen_region.setEnabled(region_ok)
+        self.bloxgen_regions_btn.setEnabled(region_ok)
+        if not region_ok:
+            self.bloxgen_region.setCurrentText("Any")
+        self._bloxgen_update_type_labels()
+
+    def _bloxgen_selected_types(self) -> list:
+        return [t for t, cb in self.bloxgen_type_checks.items()
+                if cb.isEnabled() and cb.isChecked()]
+
+    def _bloxgen_update_type_labels(self) -> None:
+        """Suffix each type checkbox with its stock status from the last check."""
+        stock = getattr(self, "_bloxgen_stock", {}) or {}
+        for t, cb in self.bloxgen_type_checks.items():
+            if not cb.isEnabled():
+                cb.setText(f"{t}  (locked for plan)")
+            elif t in stock:
+                cb.setText(f"{t}  ({'in stock' if stock[t].get('available') else 'out of stock'})")
+            else:
+                cb.setText(t)
+
+    def _bloxgen_check_stock(self) -> None:
+        keys = self._bloxgen_keys()
+        if not keys:
+            QMessageBox.warning(self, "BloxGen", "Enter at least one API key first.")
+            return
+        self.bloxgen_stock_btn.setEnabled(False)
+        worker = BloxGenQueryWorker(keys[0], "stock", self)
+        worker.done.connect(self._bloxgen_on_query)
+        worker.failed.connect(self._bloxgen_on_query_failed)
+        worker.finished.connect(lambda: (self.bloxgen_stock_btn.setEnabled(True),
+                                         self._bloxgen_query_workers.remove(worker)
+                                         if worker in self._bloxgen_query_workers else None))
+        self._bloxgen_query_workers.append(worker)
+        worker.start()
+
+    def _bloxgen_log_msg(self, msg: str) -> None:
+        try:
+            self.bloxgen_log.append(msg)
+        except Exception:
+            pass
+
+    def _bloxgen_globalize_list(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Globalize cookie list", "", "Text Files (*.txt);;All Files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                cookies = [ln.strip() for ln in f if ln.strip()]
+        except Exception as e:
+            QMessageBox.warning(self, "BloxGen", f"Read failed: {e}")
+            return
+        if not cookies:
+            QMessageBox.warning(self, "BloxGen", "No cookies in file.")
+            return
+        out_path = os.path.splitext(path)[0] + "_globalized.txt"
+        self.bloxgen_log.append(f"Globalizing {len(cookies)} cookies -> {out_path}")
+        self.bloxgen_globalize_list_btn.setEnabled(False)
+        w = GlobalizeListWorker(cookies, out_path, self)
+        w.log.connect(self._bloxgen_log_msg)
+
+        def _fin(out):
+            self.bloxgen_log.append(f"Done. {len(out)}/{len(cookies)} globalized -> {out_path}")
+            self.bloxgen_globalize_list_btn.setEnabled(True)
+            try:
+                self._bloxgen_glob_workers.remove(w)
+            except Exception:
+                pass
+        w.done.connect(_fin)
+        if not hasattr(self, "_bloxgen_glob_workers"):
+            self._bloxgen_glob_workers = []
+        self._bloxgen_glob_workers.append(w)
+        w.start()
+
+    def _bloxgen_check_balance(self) -> None:
+        keys = self._bloxgen_keys()
+        if not keys:
+            QMessageBox.warning(self, "BloxGen", "Enter at least one API key first.")
+            return
+        self.bloxgen_balance_label.setText(f"Balance: checking {len(keys)} key(s), see log...")
+        for i, key in enumerate(keys, 1):
+            worker = BloxGenQueryWorker(key, "balance", self)
+            worker.done.connect(lambda kind, data, i=i: self._bloxgen_on_query(kind, data, i))
+            worker.failed.connect(lambda kind, err, i=i: self._bloxgen_on_query_failed(kind, err, i))
+            worker.finished.connect(lambda w=worker: self._bloxgen_query_workers.remove(w)
+                                    if w in self._bloxgen_query_workers else None)
+            self._bloxgen_query_workers.append(worker)
+            worker.start()
+
+    def _bloxgen_refresh_regions(self) -> None:
+        keys = self._bloxgen_keys()
+        if not keys:
+            QMessageBox.warning(self, "BloxGen", "Enter at least one API key first.")
+            return
+        self.bloxgen_regions_btn.setEnabled(False)
+        worker = BloxGenQueryWorker(keys[0], "stock", self)  # regions are per-account; use the first key
+        worker.done.connect(self._bloxgen_on_query)
+        worker.failed.connect(self._bloxgen_on_query_failed)
+        worker.finished.connect(lambda: (self.bloxgen_regions_btn.setEnabled(True),
+                                         self._bloxgen_query_workers.remove(worker)
+                                         if worker in self._bloxgen_query_workers else None))
+        self._bloxgen_query_workers.append(worker)
+        worker.start()
+
+    def _bloxgen_on_query(self, kind: str, data, key_index: int = 0) -> None:
+        if kind == "balance":
+            bal, role = data
+            tag = f"key{key_index}" if key_index else "key"
+            self._bloxgen_log_msg(f"[{tag}] Balance ${bal:.4f} (role: {role or 'unknown'})")
+            self.bloxgen_balance_label.setText(f"Balance: {len(self._bloxgen_keys())} key(s), see log")
+            # First key's role auto-selects the plan (user can still override).
+            role_l = str(role or "").lower()
+            if role_l in [p.lower() for p in BLOXGEN_PLANS]:
+                want = role_l.capitalize()
+                if self.bloxgen_plan.currentText() != want:
+                    self.bloxgen_plan.setCurrentText(want)  # triggers _bloxgen_apply_plan
+        elif kind == "stock":
+            self._bloxgen_stock = {
+                t: info for t, info in (data or {}).items() if isinstance(info, dict)
+            }
+            regions = set()
+            avail_types = []
+            for t, info in self._bloxgen_stock.items():
+                if info.get("available"):
+                    avail_types.append(t)
+                for rc in (info.get("regions") or []):
+                    regions.add(str(rc))
+            current = self.bloxgen_region.currentText().strip()
+            self.bloxgen_region.clear()
+            self.bloxgen_region.addItem("Any")
+            for rc in sorted(regions):
+                self.bloxgen_region.addItem(rc)
+            if current:
+                self.bloxgen_region.setCurrentText(current)
+            self._bloxgen_update_type_labels()
+            self._bloxgen_log_msg(
+                f"Stock: in stock = {', '.join(avail_types) or 'none'}."
+                + (f" Regions: {', '.join(sorted(regions))}." if regions else "")
+            )
+
+    def _bloxgen_on_query_failed(self, kind: str, error: str, key_index: int = 0) -> None:
+        tag = f"key{key_index}" if key_index else kind
+        if kind == "balance" and not key_index:
+            self.bloxgen_balance_label.setText("Balance: error")
+        self._bloxgen_log_msg(f"[{tag}] {kind} lookup failed: {error}")
+
+    def _bloxgen_start(self) -> None:
+        if any(w.isRunning() for w in getattr(self, "_bloxgen_workers", [])):
+            return
+        keys = self._bloxgen_keys()
+        if not keys:
+            QMessageBox.warning(self, "BloxGen", "Enter at least one API key first.")
+            return
+        universe = self.bloxgen_universe.text().strip()
+        if not universe:
+            proceed = QMessageBox.question(
+                self, "BloxGen",
+                "No Universe ID set, accounts will be added with the cookie only "
+                "(no private server / join link). Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if proceed != QMessageBox.StandardButton.Yes:
+                return
+        types = self._bloxgen_selected_types()
+        if not types:
+            QMessageBox.warning(self, "BloxGen", "Select at least one account type your plan allows.")
+            return
+        # Drop types the last stock check flagged out of stock (if we have one).
+        stock = getattr(self, "_bloxgen_stock", {}) or {}
+        if stock:
+            in_stock = [t for t in types if t not in stock or stock.get(t, {}).get("available")]
+            dropped = [t for t in types if t not in in_stock]
+            if dropped:
+                self._bloxgen_log_msg(f"Skipping out-of-stock type(s): {', '.join(dropped)}.")
+            if not in_stock:
+                QMessageBox.warning(self, "BloxGen", "All selected types are out of stock (per last stock check).")
+                return
+            types = in_stock
+
+        self._bloxgen_save_config()
+        self._bloxgen_saved_count = 0
+        self._bloxgen_done_workers = 0
+        region = self.bloxgen_region.currentText().strip()
+        count = int(self.bloxgen_count.value())
+        self._bloxgen_total = count
+        add_disabled = bool(self.bloxgen_disabled.isChecked())
+        self._bloxgen_log_msg(
+            f"Starting: {count} account(s) of [{', '.join(types)}] (region {region or 'any'}) "
+            f"across {len(keys)} key(s) in parallel."
+        )
+        self.bloxgen_start_btn.setEnabled(False)
+        self.bloxgen_stop_btn.setEnabled(True)
+
+        plan = self.bloxgen_plan.currentText().lower()
+        coord = BloxGenCoordinator(count)
+        self._bloxgen_workers = []
+        for i, key in enumerate(keys, 1):
+            worker = BloxGenWorker(
+                key, types, region, universe, coord, add_disabled, plan, i, self,
+                globalize=bool(getattr(self, "bloxgen_globalize", None) and self.bloxgen_globalize.isChecked()),
+            )
+            worker.log.connect(self._bloxgen_log_msg)
+            worker.provisioned.connect(self._bloxgen_on_provisioned)
+            worker.finished.connect(self._bloxgen_worker_done)
+            self._bloxgen_workers.append(worker)
+        for worker in self._bloxgen_workers:
+            worker.start()
+
+    def _bloxgen_stop(self) -> None:
+        running = False
+        for worker in getattr(self, "_bloxgen_workers", []):
+            if worker.isRunning():
+                worker.stop()
+                running = True
+        if running:
+            self._bloxgen_log_msg("Stopping after the current accounts...")
+            self.bloxgen_stop_btn.setEnabled(False)
+
+    def _bloxgen_worker_done(self) -> None:
+        self._bloxgen_done_workers += 1
+        if self._bloxgen_done_workers >= len(getattr(self, "_bloxgen_workers", []) or [1]):
+            self._bloxgen_finalize()
+
+    def _bloxgen_add_provisioned(self, payload, discord_user_ids=None, as_backup=False):
+        """Add one provisioned account to JARAM's users.json.
+
+        as_backup=True stores it as a reserve account (backup + disabled), shown
+        as "Backup" in the Users tab and held out of launch until promoted.
+        discord_user_ids, when given, is inherited onto the new account so its
+        alerts/pings go to the same place as the account it replaced.
+
+        Returns (uid, username, ok, message). ok=False on skip/failure. Runs on
+        the GUI thread, so concurrent workers' saves are naturally serialized.
+        ponytail: per-account save + refresh (O(n) rewrites); fine for tens of
+        accounts, batch only if someone generates hundreds at once.
+        """
+        acc = payload.get("generated") or {}
+        prov = payload.get("prov") or {}
+        disabled = bool(payload.get("add_disabled")) or bool(as_backup)
+        uid = str(prov.get("user_id") or acc.get("id") or "").strip()
+        if not uid:
+            return "", "", False, "no Roblox user id resolved"
+        users = self.config_manager.load_users()
+        if uid in users:
+            return uid, str(users[uid].get("username") or uid), False, f"user {uid} already in JARAM"
+        link = str(prov.get("private_server_link") or "")
+        place = str(prov.get("place") or "")
+        username = str(prov.get("username") or acc.get("username") or f"User_{uid}")
+        try:
+            discord_ids = normalize_discord_ids(discord_user_ids) if discord_user_ids else []
+        except Exception:
+            discord_ids = []
+        users[uid] = {
+            "username": username,
+            "server_type": "private" if link else "public",
+            "private_server_link": link,
+            "place": "" if link else place,
+            "cookie": str(acc.get("cookie") or ""),
+            "last_launch": 0.0,
+            "disabled": disabled,
+            "backup": bool(as_backup),
+            "alternate_launch": False,
+            "launch_priority": DEFAULT_LAUNCH_PRIORITY,
+            "skip_reconnect_on_log_disconnect": False,
+            "cap": False,
+            "discord_user_ids": discord_ids,
+            "bloxgen_generated": True,  # marks BloxGen-made accounts (chain prevention)
+        }
+        if not self.config_manager.save_users(users):
+            err = getattr(self.config_manager, "_cookie_last_error", "") or "cookies may be locked"
+            return uid, username, False, f"save failed ({err})"
+        try:
+            self.refresh_accounts_list()
+            self.refresh_users()
+        except Exception:
+            pass
+        tail = "with join link" if link else "(cookie only)"
+        return uid, username, True, tail
+
+    def _bloxgen_on_provisioned(self, payload) -> None:
+        uid, username, ok, msg = self._bloxgen_add_provisioned(payload)
+        if not ok:
+            self._bloxgen_log_msg(f"Skipped {uid or '?'}: {msg}")
+            return
+        self._bloxgen_saved_count += 1
+        self._bloxgen_log_msg(f"Added {username} ({uid}) to JARAM {msg}.")
+        self.bloxgen_progress_label.setText(
+            f"Working: {self._bloxgen_saved_count}/{getattr(self, '_bloxgen_total', 0)} added"
+        )
+
+    def _bloxgen_finalize(self) -> None:
+        self.bloxgen_start_btn.setEnabled(True)
+        self.bloxgen_stop_btn.setEnabled(False)
+        total = getattr(self, "_bloxgen_total", 0)
+        self.bloxgen_progress_label.setText(
+            f"Done. {self._bloxgen_saved_count}/{total} added to JARAM."
+        )
+        self._bloxgen_log_msg(
+            f"Finished: {self._bloxgen_saved_count} accounts added to JARAM."
+        )
+
+    # ── Auto Replace Accounts ──────────────────────────────────────────
+    def _autorep_load_config(self) -> dict:
+        try:
+            return dict((self.config_manager.load_settings() or {}).get("bloxgen_auto_replace") or {})
+        except Exception:
+            return {}
+
+    def _autorep_save_config(self) -> None:
+        try:
+            settings = self.config_manager.load_settings() or {}
+            settings["bloxgen_auto_replace"] = {
+                "enabled": bool(self.autorep_enabled.isChecked()),
+                "region": self.autorep_region.currentText().strip(),
+                "types": [t for t, cb in self.autorep_type_checks.items() if cb.isChecked()],
+                "trigger_bad": bool(self.autorep_trigger_bad.isChecked()),
+                "trigger_cap": bool(self.autorep_trigger_cap.isChecked()),
+                "max_replacements": int(self.autorep_max.value()),
+                "backup_target": int(self.autorep_backup_target.value()),
+                "skip_generated": bool(self.autorep_skip_generated.isChecked()),
+                "disable_old": bool(self.autorep_disable_old.isChecked()),
+                "maintain_count": bool(self.autorep_maintain_count.isChecked()),
+            }
+            self.config_manager.save_settings(settings)
+        except Exception:
+            pass
+
+    def _autorep_log_msg(self, msg: str) -> None:
+        try:
+            self.autorep_log.append(msg)
+        except Exception:
+            pass
+
+    def _autorep_selected_types(self) -> list:
+        return [t for t, cb in getattr(self, "autorep_type_checks", {}).items() if cb.isChecked()]
+
+    def _autorep_disable_flagged(self, uid) -> None:
+        if not self.autorep_disable_old.isChecked():
+            return
+        try:
+            users = self.config_manager.load_users()
+            if uid in users:
+                users[uid]["disabled"] = True
+                self.config_manager.save_users(users)
+                self._autorep_log_msg(f"Disabled the flagged account {uid}.")
+        except Exception:
+            pass
+
+    # ── Backup account pool (stored as backup=True accounts in users.json) ──
+    def _bloxgen_backup_count(self) -> int:
+        try:
+            users = self.config_manager.peek_users() or {}
+        except Exception:
+            users = {}
+        return sum(1 for info in users.values() if isinstance(info, dict) and info.get("backup"))
+
+    def _bloxgen_update_backup_label(self) -> None:
+        try:
+            tgt = int(self.autorep_backup_target.value())
+            self.autorep_backup_label.setText(f"Backup stored: {self._bloxgen_backup_count()} / {tgt}")
+        except Exception:
+            pass
+
+    def _bloxgen_promote_backup(self, discord_user_ids=None):
+        """Promote one backup account to normal so JARAM launches it.
+
+        Returns (uid, username) or None. Inherits the replaced account's pings.
+        """
+        users = self.config_manager.load_users()
+        target_uid = None
+        for uid, info in users.items():
+            if isinstance(info, dict) and info.get("backup"):
+                target_uid = uid
+                break
+        if target_uid is None:
+            return None
+        info = users[target_uid]
+        info["backup"] = False
+        info["disabled"] = False  # becomes eligible; scheduler relaunches it
+        if discord_user_ids:
+            try:
+                info["discord_user_ids"] = normalize_discord_ids(discord_user_ids)
+            except Exception:
+                pass
+        if not self.config_manager.save_users(users):
+            return None
+        try:
+            self.refresh_accounts_list()
+            self.refresh_users()
+        except Exception:
+            pass
+        self._bloxgen_update_backup_label()
+        return target_uid, str(info.get("username") or target_uid)
+
+    def _bloxgen_backup_refill(self) -> None:
+        """Top the backup pool up to its target in the background (if BloxGen is up)."""
+        try:
+            target = int(self.autorep_backup_target.value())
+        except Exception:
+            return
+        if target <= 0:
+            return
+        if getattr(self, "_bloxgen_backup_worker", None) and self._bloxgen_backup_worker.isRunning():
+            return
+        deficit = target - self._bloxgen_backup_count()
+        if deficit <= 0:
+            return
+        keys = self._bloxgen_keys()
+        if not keys:
+            return  # can't refill without a key; existing backups still cover replacements
+        plan = self.bloxgen_plan.currentText().lower()
+        types = [t for t in self._autorep_selected_types() if t in bloxgen_allowed_types(plan)]
+        if not types:
+            return
+        universe = self.bloxgen_universe.text().strip()
+        region = self.autorep_region.currentText().strip()
+        self._autorep_log_msg(f"Refilling backup pool: generating {deficit} account(s)...")
+        coord = BloxGenCoordinator(deficit)
+        worker = BloxGenWorker(
+            keys[0], types, region, universe, coord, False, plan, 1, self,
+            globalize=bool(getattr(self, "bloxgen_globalize", None) and self.bloxgen_globalize.isChecked()),
+        )
+        worker.log.connect(self._autorep_log_msg)
+        worker.provisioned.connect(self._bloxgen_backup_on_provisioned)
+        worker.finished.connect(self._bloxgen_update_backup_label)
+        self._bloxgen_backup_worker = worker
+        worker.start()
+
+    def _bloxgen_backup_on_provisioned(self, payload) -> None:
+        uid, username, ok, msg = self._bloxgen_add_provisioned(payload, as_backup=True)
+        self._bloxgen_update_backup_label()
+        if ok:
+            self._autorep_log_msg(f"Stored backup {username} ({uid}); {self._bloxgen_backup_count()} in reserve.")
+        else:
+            self._autorep_log_msg(f"Backup gen skipped {uid or '?'}: {msg}")
+
+    def _maintain_account_count(self, good_count: int) -> None:
+        """Hold the healthy headcount at its start-of-session target.
+
+        Runs every UI tick (1s) on the GUI thread. When the count drops below
+        target, promote backups to refill it, then restock the backup pool in the
+        background. Single source of truth when enabled (see _auto_replace_on_flag).
+        """
+        if not getattr(self, "_maintain_enabled", False):
+            return
+        if getattr(self, "_manager_paused", False):
+            return  # don't promote while paused
+        wt = getattr(self, "worker_thread", None)
+        if not (wt and wt.isRunning()):
+            return  # only reconcile while the manager is actually running
+        target = int(getattr(self, "_maintain_target", 0) or 0)
+        if target <= 0 or good_count >= target:
+            return
+        deficit = target - good_count
+        promoted = 0
+        for _ in range(deficit):
+            res = self._bloxgen_promote_backup()
+            if not res:
+                break  # backup pool empty
+            promoted += 1
+        if promoted:
+            self._autorep_log_msg(
+                f"Maintain count: {good_count}/{target} healthy, promoted {promoted} backup(s)."
+            )
+            self._bloxgen_backup_refill()  # restock the reserve in the background
+        else:
+            # No backups to promote — warn at most once a minute, not every tick.
+            now = time.time()
+            if now - float(getattr(self, "_maintain_no_backup_warned_at", 0.0)) >= 60.0:
+                self._maintain_no_backup_warned_at = now
+                self._autorep_log_msg(
+                    f"Maintain count: {good_count}/{target} healthy but no backups left to promote."
+                )
+
+    def _autorep_toggled_live(self, on: bool) -> None:
+        """Enable/disable the hold-count loop when the toggle changes mid-run,
+        so you don't have to Stop/Start the manager for it to take effect."""
+        wt = getattr(self, "worker_thread", None)
+        if not (wt and wt.isRunning()):
+            return  # not running: start_manager will pick up the toggle
+        if on:
+            try:
+                ucfg = self.config_manager.peek_users() or {}
+                target = sum(
+                    1 for i in ucfg.values()
+                    if isinstance(i, dict) and not (i.get("bad") or i.get("cap")) and not i.get("disabled") and not i.get("backup")
+                )
+            except Exception:
+                target = 0
+            self._maintain_target = int(target)
+            self._maintain_enabled = True
+            self._maintain_no_backup_warned_at = 0.0
+            self._autorep_log_msg(f"Maintain count enabled (live): holding {target} account(s).")
+        else:
+            self._maintain_enabled = False
+            self._maintain_target = 0
+
+    def _auto_replace_on_flag(self, uid) -> None:
+        uid = str(uid or "").strip()
+        if not uid:
+            return
+        # When "maintain count" is on, the reconcile loop is the single source of
+        # truth — skip the per-flag path so the two don't double-promote.
+        if getattr(self, "_maintain_enabled", False):
+            return
+        if not getattr(self, "autorep_enabled", None) or not self.autorep_enabled.isChecked():
+            return
+        if uid in getattr(self, "_auto_replaced_uids", set()):
+            return
+        info = {}
+        try:
+            users = self.config_manager.peek_users()
+            if isinstance(users, dict):
+                info = users.get(uid, {}) or {}
+        except Exception:
+            info = {}
+        if bool(info.get("disabled", False)):
+            return  # user disabled it on purpose, not a replacement case
+        # Which flag fired, and is that flag a trigger?
+        is_bad = bool(info.get("bad", False))
+        is_cap = bool(info.get("cap", False))
+        if not ((is_bad and self.autorep_trigger_bad.isChecked())
+                or (is_cap and self.autorep_trigger_cap.isChecked())):
+            return
+        # Chain prevention: optionally never replace a BloxGen-made account.
+        if self.autorep_skip_generated.isChecked() and bool(info.get("bloxgen_generated", False)):
+            self._autorep_log_msg(f"{uid} is a BloxGen-made account; skipping (chain prevention).")
+            return
+        # NOTE: no "solver will handle it" gate here. This signal only fires when
+        # an account has *already* flipped to bad/CAP (see bloxgen_replace_signal
+        # emit), which for CAP means the solver already ran its 3 attempts and
+        # failed. Skipping replacement just because a captcha key exists would
+        # leave those exhausted accounts uncovered and the user count dropping.
+
+        # Per-session cap.
+        mx = int(self.autorep_max.value())
+        if mx > 0 and self._auto_replace_count >= mx:
+            self._autorep_log_msg(f"Reached max replacements ({mx}) this session; skipping {uid}.")
+            return
+        uname = str(info.get("username") or uid)
+
+        # 1) Promote a stored backup account first: instant, and works even if
+        # BloxGen is down or no key is set. Then restock in the background.
+        inherit_ids = info.get("discord_user_ids")
+        promoted = self._bloxgen_promote_backup(discord_user_ids=inherit_ids)
+        if promoted is not None:
+            ruid, rusername = promoted
+            self._auto_replaced_uids.add(uid)
+            self._auto_replace_count += 1
+            self._autorep_log_msg(f"{uname} ({uid}) flagged; promoted backup account -> {rusername} ({ruid}).")
+            self._autorep_disable_flagged(uid)
+            self._bloxgen_backup_refill()
+            return
+
+        # 2) No backup available: generate one live via BloxGen.
+        keys = self._bloxgen_keys()
+        if not keys:
+            self._autorep_log_msg(f"{uid} flagged, no backup available and no BloxGen API key set; cannot replace.")
+            return
+        plan = self.bloxgen_plan.currentText().lower()
+        types = [t for t in self._autorep_selected_types() if t in bloxgen_allowed_types(plan)]
+        if not types:
+            self._autorep_log_msg(f"{uid} flagged, but no replacement account types are selected/allowed.")
+            return
+        universe = self.bloxgen_universe.text().strip()
+        region = self.autorep_region.currentText().strip()
+        self._auto_replaced_uids.add(uid)
+        self._auto_replace_count += 1
+        self._autorep_log_msg(f"{uname} ({uid}) flagged with no auto-solver; generating a replacement...")
+        self._autorep_disable_flagged(uid)
+        coord = BloxGenCoordinator(1)
+        worker = BloxGenWorker(
+            keys[0], types, region, universe, coord, False, plan, 1, self,
+            globalize=bool(getattr(self, "bloxgen_globalize", None) and self.bloxgen_globalize.isChecked()),
+        )
+        worker._inherit_discord_ids = inherit_ids  # replacement inherits the flagged account's pings
+        worker.log.connect(self._autorep_log_msg)
+        worker.provisioned.connect(self._autorep_on_provisioned)
+        worker.finished.connect(lambda w=worker: self._auto_replace_workers.remove(w)
+                                if w in self._auto_replace_workers else None)
+        self._auto_replace_workers.append(worker)
+        worker.start()
+
+    def _autorep_on_provisioned(self, payload) -> None:
+        inherit_ids = getattr(self.sender(), "_inherit_discord_ids", None)
+        uid, username, ok, msg = self._bloxgen_add_provisioned(payload, discord_user_ids=inherit_ids)
+        if not ok:
+            self._autorep_log_msg(f"Replacement skipped {uid or '?'}: {msg}")
+            return
+        # New account is added with requires_restart=True, so JARAM's scheduler
+        # launches it automatically, no explicit launch call needed.
+        self._autorep_log_msg(f"Replacement {username} ({uid}) added; it will launch automatically {msg}.")
+
     def disable_selected_users(self, table=None):
         user_ids = self._get_selected_user_ids(table)
         if not user_ids:
@@ -34072,80 +25588,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             self.refresh_users()
             self.refresh_accounts_list()
             QMessageBox.information(self, "Accounts Disabled", f"Disabled {changed} account(s).")
-        else:
-            QMessageBox.critical(self, "Error", "Failed to save account configuration.")
-
-    def delete_selected_accounts(self, table=None):
-        if table is None:
-            table = getattr(self, "accounts_list", None)
-        user_ids = self._get_selected_user_ids(table)
-        if not user_ids:
-            label = self._selection_label_for_table(table)
-            QMessageBox.information(self, f"Select {label}", f"Select one or more {label.lower()} rows first.")
-            return
-        reply = QMessageBox.question(
-            self,
-            "Confirm Delete",
-            f"Delete {len(user_ids)} selected account(s)? This cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        users_config = self.config_manager.load_users()
-        removed = 0
-        removed_ids: List[str] = []
-        for uid in user_ids:
-            if uid in users_config:
-                users_config.pop(uid, None)
-                removed += 1
-                removed_ids.append(uid)
-        if removed == 0:
-            QMessageBox.information(self, "No Changes", "No matching accounts to delete.")
-            return
-        if self.config_manager.save_users(users_config):
-            if removed_ids and self.worker_thread and self.worker_thread.isRunning():
-                for uid in removed_ids:
-                    self._queue_worker_action("kill_user_processes", uid)
-            self.refresh_accounts_list()
-            self.refresh_users()
-            QMessageBox.information(self, "Accounts Deleted", f"Deleted {removed} account(s).")
-        else:
-            QMessageBox.critical(self, "Error", "Failed to save account configuration.")
-
-    def toggle_selected_users_status(self, table=None):
-        user_ids = self._get_selected_user_ids(table)
-        if not user_ids:
-            label = self._selection_label_for_table(table)
-            QMessageBox.information(self, f"Select {label}", f"Select one or more {label.lower()} rows first.")
-            return
-        users_config = self.config_manager.load_users()
-        changed = 0
-        disabled_now: List[str] = []
-        enabled_now = 0
-        for uid in user_ids:
-            info = users_config.get(uid)
-            if not isinstance(info, dict):
-                continue
-            info["disabled"] = not info.get("disabled", False)
-            changed += 1
-            if info["disabled"]:
-                disabled_now.append(uid)
-            else:
-                enabled_now += 1
-        if changed == 0:
-            QMessageBox.information(self, "No Changes", "No selected users could be updated.")
-            return
-        if self.config_manager.save_users(users_config):
-            if disabled_now and self.worker_thread and self.worker_thread.isRunning():
-                for uid in disabled_now:
-                    self._queue_worker_action("kill_user_processes", uid)
-            self.refresh_users()
-            self.refresh_accounts_list()
-            QMessageBox.information(
-                self,
-                "Status Toggled",
-                f"Toggled {changed} account(s): {len(disabled_now)} disabled, {enabled_now} enabled.",
-            )
         else:
             QMessageBox.critical(self, "Error", "Failed to save account configuration.")
 
@@ -34530,162 +25972,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         event.accept()
     
-    def setup_multiscope_tab(self):
-        multiscope_widget = QWidget()
-        layout = QVBoxLayout(multiscope_widget)
-
-        self.multiscope_table = QTableWidget()
-        self.multiscope_table.setColumnCount(9)
-        self.multiscope_table.setHorizontalHeaderLabels([
-            "Server", "Users", "Username", "In-Menu", "Last Biome", "Biome Age", "Last Merchant", "Merchant Age", "Events"
-        ])
-        header = self.multiscope_table.horizontalHeader()
-        # NOTE: ResizeToContents becomes expensive with frequent updates; prefer fixed/interactive sizing.
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)
-        self.multiscope_table.setColumnWidth(0, 160)
-        self.multiscope_table.setColumnWidth(3, 80)
-        self.multiscope_table.setColumnWidth(4, 140)
-        self.multiscope_table.setColumnWidth(5, 90)
-        self.multiscope_table.setColumnWidth(6, 140)
-        self.multiscope_table.setColumnWidth(7, 110)
-        self.multiscope_table.setColumnWidth(8, 80)
-        self.multiscope_table.verticalHeader().setDefaultSectionSize(44)
-        self.multiscope_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.multiscope_table.setWordWrap(False)
-        try:
-            self.multiscope_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        except Exception:
-            pass
-
-        layout.addWidget(self.multiscope_table)
-
-        hint = QLabel(
-            "Multiscope groups accounts by the exact server they’re in.\n"
-            "Biome and merchant alerts persist across handoffs."
-        )
-        hint.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
-        layout.addWidget(hint)
-
-        self.multiscope_tab_index = self.tab_widget.addTab(multiscope_widget, "Multiscope")
-
-    def _schedule_multiscope_table_refresh(self, *, immediate: bool = False) -> None:
-        self._multiscope_table_dirty = True
-        if self._multiscope_table_refresh_pending:
-            return
-        try:
-            if self.multiscope_tab_index is not None and self.tab_widget.currentIndex() != self.multiscope_tab_index:
-                return
-        except Exception:
-            return
-        self._multiscope_table_refresh_pending = True
-        QTimer.singleShot(0 if immediate else 150, self._flush_multiscope_table_refresh)
-
-    def _flush_multiscope_table_refresh(self) -> None:
-        self._multiscope_table_refresh_pending = False
-        if not self._multiscope_table_dirty:
-            return
-        try:
-            if self.multiscope_tab_index is not None and self.tab_widget.currentIndex() != self.multiscope_tab_index:
-                return
-        except Exception:
-            return
-
-        rows = self._multiscope_table_latest_rows or []
-        self._multiscope_table_dirty = False
-        self._render_multiscope_table(rows)
-
-    def _set_multiscope_table_item(self, row: int, col: int, text: str) -> None:
-        table = getattr(self, "multiscope_table", None)
-        if table is None:
-            return
-        try:
-            item = table.item(row, col)
-            s = str(text)
-            if item is None:
-                table.setItem(row, col, QTableWidgetItem(s))
-            elif item.text() != s:
-                item.setText(s)
-        except Exception:
-            return
-
-    def _render_multiscope_table(self, rows: list) -> None:
-        table = getattr(self, "multiscope_table", None)
-        if table is None:
-            return
-
-        try:
-            table.setUpdatesEnabled(False)
-        except Exception:
-            pass
-
-        try:
-            try:
-                if int(table.rowCount()) != len(rows):
-                    table.setRowCount(len(rows))
-            except Exception:
-                table.setRowCount(len(rows))
-
-            settings = {}
-            try:
-                manager = getattr(self.worker_thread, "manager", None)
-                if manager and isinstance(getattr(manager, "settings", None), dict):
-                    settings = manager.settings
-            except Exception:
-                settings = {}
-
-            for r, row in enumerate(rows or []):
-                if not isinstance(row, dict):
-                    continue
-                server = row.get("server", "")
-                users_list = row.get("users", []) or []
-                if not isinstance(users_list, (list, tuple)):
-                    users_list = [users_list]
-                users = ", ".join(map(str, users_list)) if users_list else ""
-
-                usernames_list = []
-                for uid in (users_list or []):
-                    info = settings.get(str(uid), {}) if isinstance(settings, dict) else {}
-                    uname = str(info.get("username", "") or "").strip() if isinstance(info, dict) else ""
-                    usernames_list.append(uname or str(uid))
-                usernames = ", ".join(usernames_list) if usernames_list else ""
-
-                in_menu_val = row.get("in_menu")
-                if in_menu_val is None:
-                    in_menu_txt = "None"
-                else:
-                    in_menu_txt = "True" if in_menu_val else "False"
-
-                # accept both key styles
-                last_biome = row.get("last_biome", row.get("biome", ""))
-                biome_age = row.get("biome_age")
-                last_merchant = row.get("last_merchant", row.get("merchant", ""))
-                merchant_age = row.get("merchant_age")
-                events = str(row.get("events", 0))
-
-                self._set_multiscope_table_item(r, 0, server)
-                self._set_multiscope_table_item(r, 1, users)
-                self._set_multiscope_table_item(r, 2, usernames)
-                self._set_multiscope_table_item(r, 3, in_menu_txt)
-                self._set_multiscope_table_item(r, 4, last_biome)
-                self._set_multiscope_table_item(r, 5, f"{biome_age}s" if biome_age is not None else "")
-                self._set_multiscope_table_item(r, 6, last_merchant)
-                self._set_multiscope_table_item(r, 7, f"{merchant_age}s" if merchant_age is not None else "")
-                self._set_multiscope_table_item(r, 8, events)
-
-        finally:
-            try:
-                table.setUpdatesEnabled(True)
-            except Exception:
-                pass
-
     def update_multiscope(self, rows: list):
         # rows: [{server, users, in_menu, last_biome|biome, biome_age, last_merchant|merchant, merchant_age, events}]
         try:
@@ -34787,12 +26073,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             pass
 
     def test_selected_webhook(self):
-        try:
-            import requests
-        except Exception:
-            QMessageBox.warning(self, "Missing dependency", "The 'requests' library is required to send test webhooks.")
-            return
-
         table = getattr(self, "webhooks_table", None)
         if table is None:
             QMessageBox.warning(self, "Webhooks", "Webhook table is not available.")
@@ -34832,7 +26112,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         }
 
         try:
-            resp = requests.post(url, json=payload, timeout=8)
+            resp = webhook_gate.post(url, json=payload, timeout=8, max_wait_s=8)
         except Exception as exc:
             QMessageBox.critical(self, "Webhook Test Failed", f"Failed to send test message: {exc}")
             return
@@ -34843,12 +26123,6 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             QMessageBox.warning(self, "Webhook Test Failed", f"Status {resp.status_code} from {title}.")
 
     def test_merchant_pings(self):
-        try:
-            import requests
-        except Exception:
-            QMessageBox.warning(self, "Missing dependency", "The 'requests' library is required to send test webhooks.")
-            return
-
         if not hasattr(self, "ms_merchant_webhook_input"):
             QMessageBox.warning(self, "Merchant Pings", "Merchant webhook input is not available.")
             return
@@ -34885,7 +26159,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                 }]
             }
             try:
-                resp = requests.post(merchant_hook, json=payload, timeout=8)
+                resp = webhook_gate.post(merchant_hook, json=payload, timeout=8, max_wait_s=8)
                 if resp.ok:
                     ok += 1
                 else:
@@ -34895,55 +26169,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
 
         QMessageBox.information(self, "Merchant Ping Test", f"Sent: {ok}  Failed: {fail}")
 
-    def test_multiscope_webhooks(self):
-        # Legacy entry point kept for compatibility.
-        self.test_merchant_pings()
-        return
-        try:
-            import requests
-        except Exception:
-            QMessageBox.warning(self, "Missing dependency", "The 'requests' library is required to send test webhooks.")
-            return
+ui_shell.install(RobloxManagerGUI)  # page modules' methods
 
-        # Build fake embeds
-        biome_hooks_txt = self.ms_biome_webhooks_input.text().strip()
-        biome_hooks = [s.strip() for s in biome_hooks_txt.split(",") if s.strip()] if biome_hooks_txt else []
-        merchant_hook = self.ms_merchant_webhook_input.text().strip()
-        j_ping = self.ms_jester_ping_input.text().strip()
-        m_ping = self.ms_mari_ping_input.text().strip()
-
-        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-        biome_payload = {"content": "", "embeds": [{
-            "title": "🌍 Biome, TEST_BIOME",
-            "description": "**User:** `TestUser`\n**Server:** `PS:TEST…`",
-            "timestamp": now_iso, "color": 0x3BA55D
-        }]}
-
-        merch_payload_j = {"content": j_ping, "embeds": [{
-            "title": "🛒 Merchant, Jester",
-            "description": "**User:** `TestUser`\n**Server:** `PS:TEST…`",
-            "timestamp": now_iso, "color": 0x5865F2
-        }]}
-        merch_payload_m = {"content": m_ping, "embeds": [{
-            "title": "🛒 Merchant, Mari",
-            "description": "**User:** `TestUser`\n**Server:** `PS:TEST…`",
-            "timestamp": now_iso, "color": 0xE67E22
-        }]}
-
-        ok = 0; fail = 0
-        try:
-            for url in biome_hooks:
-                if not url: continue
-                r = requests.post(url, json=biome_payload, timeout=8)
-                (ok if r.ok else fail).__iadd__(1)
-            if merchant_hook:
-                r1 = requests.post(merchant_hook, json=merch_payload_j, timeout=8); (ok if r1.ok else fail).__iadd__(1)
-                r2 = requests.post(merchant_hook, json=merch_payload_m, timeout=8); (ok if r2.ok else fail).__iadd__(1)
-        except Exception:
-            fail += 1
-
-        QMessageBox.information(self, "Webhook Test", f"Sent: {ok}  •  Failed: {fail}")
 
 def main():
     # Silence noisy Windows DPI-awareness warning:
@@ -34958,21 +26185,12 @@ def main():
 
     app = QApplication(sys.argv)
 
-    from version import __version__ as _app_version
     app.setApplicationName("M.J.JARAM")
+    from version import __version__ as _app_version
     app.setApplicationVersion(f"JX {_app_version}")
     app.setOrganizationName("Jirach1")
-    # Qt 6 ships a Windows 11 style that can change widget visuals. Force the
-    # Windows 10-era style for consistent UI across OS versions.
-    try:
-        from PySide6.QtWidgets import QStyleFactory
-
-        if "windowsvista" in {str(k).lower() for k in QStyleFactory.keys()}:
-            style = QStyleFactory.create("windowsvista")
-            if style is not None:
-                app.setStyle(style)
-    except Exception:
-        pass
+    # Fusion draws the ui_kit stylesheet the same on every Windows version (native styles ignore parts of it).
+    app.setStyle("Fusion")
 
     try:
         from qt_event_filters import NoEnterInPopupsFilter

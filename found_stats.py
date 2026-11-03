@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QMessageBox,
     QPushButton,
     QStyle,
     QTabWidget,
@@ -30,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from biomes import biome_meta, biome_names
+from biomes import biome_duration, biome_meta, biome_names
 
 
 FOUND_STATS_DEBUG = str(os.environ.get("JARAM_FOUND_STATS_DEBUG", "")).strip().lower() in {"1", "true", "yes", "on"}
@@ -118,18 +117,6 @@ class FoundStatsMixin:
             "merchants_total_count": m_total,
         }
 
-    def _refresh_extras_found_counters(self) -> None:
-        act = getattr(self, "_extras_found_counter_action", None)
-        if not act:
-            return
-        try:
-            snap = self._get_found_stats_snapshot()
-            b = int(snap.get("biomes_total_count", 0) or 0)
-            m = int(snap.get("merchants_total_count", 0) or 0)
-            act.setText(f"All-time found: Biomes {b} | Merchants {m}")
-        except Exception:
-            pass
-
     def show_found_stats_window(self) -> None:
         dlg = QDialog(self)
         
@@ -188,12 +175,12 @@ class FoundStatsMixin:
         layout = QVBoxLayout(dlg)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel("Time Range:"))
+        top.addWidget(QLabel("Show"))
         range_combo = QComboBox()
-        range_combo.addItem("All Time", None)
-        range_combo.addItem("Last 24 Hours", 24 * 3600)
-        range_combo.addItem("Last 7 Days", 7 * 24 * 3600)
-        range_combo.addItem("Last 30 Days", 30 * 24 * 3600)
+        range_combo.addItem("All time", None)
+        range_combo.addItem("Last 24 hours", 24 * 3600)
+        range_combo.addItem("Last 7 days", 7 * 24 * 3600)
+        range_combo.addItem("Last 30 days", 30 * 24 * 3600)
         top.addWidget(range_combo)
         top.addStretch()
         refresh_btn = QPushButton("Refresh")
@@ -2375,86 +2362,3 @@ class FoundStatsMixin:
         refresh_btn.clicked.connect(_refresh)
         _refresh()
         dlg.exec()
-
-    def show_all_time_found_breakdown(self) -> None:
-        snap = self._get_found_stats_snapshot()
-        bt = snap.get("biomes_total") if isinstance(snap.get("biomes_total"), dict) else {}
-        mt = snap.get("merchants_total") if isinstance(snap.get("merchants_total"), dict) else {}
-        b_total = int(snap.get("biomes_total_count", 0) or 0)
-        m_total = int(snap.get("merchants_total_count", 0) or 0)
-
-        def _fmt_counts(d: dict) -> str:
-            items = []
-            for k, v in (d or {}).items():
-                try:
-                    items.append((str(k), int(v)))
-                except Exception:
-                    continue
-            items.sort(key=lambda kv: (-kv[1], kv[0]))
-            return "\n".join(f"{k}: {v}" for k, v in items) if items else "(none)"
-
-        details = (
-            "Biomes (all time):\n"
-            f"{_fmt_counts(bt)}\n\n"
-            "Merchants (all time):\n"
-            f"{_fmt_counts(mt)}"
-        )
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("All-Time Found Breakdown")
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.setText(f"Biomes found (all time): {b_total}\nMerchants found (all time): {m_total}")
-        msg.setDetailedText(details)
-        msg.exec()
-
-    def show_biomes_found_window(self, window_seconds: float, title: str) -> None:
-        counts = {}
-        total = 0
-        try:
-            wt = getattr(self, "worker_thread", None)
-            ms = getattr(wt, "ms", None) if wt else None
-            if ms:
-                out = ms.get_biomes_found_counts(window_seconds)
-                counts = out.get("counts", {}) if isinstance(out, dict) else {}
-                total = int(out.get("total", 0) or 0) if isinstance(out, dict) else 0
-            else:
-                stats = self._load_found_stats_from_disk()
-                evs = stats.get("biome_events", []) if isinstance(stats, dict) else []
-                now_ts = time.time()
-                cutoff = now_ts - float(window_seconds)
-                for ev in (evs or []):
-                    if not isinstance(ev, dict):
-                        continue
-                    try:
-                        ts = float(ev.get("ts", 0))
-                    except Exception:
-                        continue
-                    if ts < cutoff:
-                        continue
-                    b = ev.get("biome")
-                    if not isinstance(b, str):
-                        continue
-                    biome = b.strip().upper()
-                    if not biome or biome == "NORMAL":
-                        continue
-                    counts[biome] = int(counts.get(biome, 0)) + 1
-                total = sum(int(v) for v in counts.values())
-        except Exception:
-            counts = {}
-            total = 0
-
-        items = []
-        for k, v in (counts or {}).items():
-            try:
-                items.append((str(k), int(v)))
-            except Exception:
-                continue
-        items.sort(key=lambda kv: (-kv[1], kv[0]))
-        detail = "\n".join(f"{k}: {v}" for k, v in items) if items else "(none)"
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle(f"Biomes Found, {title}")
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.setText(f"Biomes found ({title}): {total}")
-        msg.setDetailedText(detail)
-        msg.exec()

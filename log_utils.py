@@ -75,11 +75,6 @@ class LogLookupResult:
     def is_match(self) -> bool:
         return self.status == "matched" and self.match is not None
 
-    @property
-    def is_conclusive(self) -> bool:
-        return self.status in {"matched", "conclusively_missing"}
-
-
 @dataclass
 class _IndexedFile:
     path: str
@@ -212,27 +207,6 @@ class RobloxLogIndex:
         if generation_id:
             with self._lock:
                 self._pinned_generations.discard(generation_id)
-
-    def invalidate_generation(self, path: str | os.PathLike[str]) -> None:
-        """Force a same-path file to be rediscovered as a new generation."""
-        norm_path = self._normalize(path)
-        with self._lock:
-            state = self._files.get(norm_path)
-            if state is None:
-                self.mark_dirty(path)
-                return
-            self._pinned_generations.discard(state.generation_id)
-            state.revision += 1
-            state.generation_id = self._generation_id(norm_path, state.identity, state.revision)
-            state.scan_pos = 0
-            state.marker_carry = b""
-            state.markers.clear()
-            state.classified = False
-            state.read_pending = True
-            state.read_error = False
-            self._stats["truncations"] += 1
-            self._dirty_paths.add(norm_path)
-            self._next_poll_at = 0.0
 
     def has_generation(self, generation_id: str) -> bool:
         generation = str(generation_id or "")
@@ -753,32 +727,6 @@ def find_log_for_username(
         newest = get_roblox_log_index().newest_log()
         return newest.path if newest else None
     return None
-
-
-def find_newest_log() -> Optional[str]:
-    match = get_roblox_log_index().newest_log()
-    return match.path if match else None
-
-
-def refresh_username_log_map() -> None:
-    index = get_roblox_log_index()
-    index.poll(force=True)
-    mapping: dict[str, str] = {}
-    with index._lock:
-        for state in index._files.values():
-            for username in state.markers:
-                previous = mapping.get(username)
-                if previous is None:
-                    mapping[username] = state.path
-                    continue
-                prev_state = index._files.get(index._normalize(previous))
-                if prev_state is None or (state.session_started_at, state.mtime_ns) > (
-                    prev_state.session_started_at,
-                    prev_state.mtime_ns,
-                ):
-                    mapping[username] = state.path
-    _CACHE["map"] = mapping
-    _CACHE["expire_at"] = time.time() + _POLL_INTERVAL_SECONDS
 
 
 def shutdown_log_index() -> None:

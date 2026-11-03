@@ -3,7 +3,7 @@ import sys
 import traceback
 from typing import Optional
 from PySide6.QtCore import Qt, QTimer, QRect, QSize
-from PySide6.QtGui import QIcon, QPixmap, QColor, QFont, QPainter, QLinearGradient
+from PySide6.QtGui import QIcon, QPixmap, QColor, QFont, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QSplashScreen,
@@ -36,11 +36,10 @@ if hasattr(Qt, "AlignmentFlag"):
 
 
 # Lightweight palette for the splash; mirrors ModernStyle defaults
-BACKGROUND = "#1e1e1e"
-PRIMARY = "#6366f1"
-SECONDARY = "#10b981"
-TEXT_PRIMARY = "#ffffff"
-TEXT_SECONDARY = "#a1a1aa"
+BACKGROUND = "#10161C"  # same palette as ui_kit
+BORDER = "#2C3742"
+TEXT_PRIMARY = "#E6EBF0"
+TEXT_SECONDARY = "#A9B4BF"
 
 
 class _RaisedMessageSplash(QSplashScreen):
@@ -81,11 +80,8 @@ def _create_loading_screen(icon_path: Optional[str]) -> QSplashScreen:
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-    accent = QLinearGradient(0, 0, width, height)
-    accent.setColorAt(0.0, QColor(PRIMARY))
-    accent.setColorAt(1.0, QColor(SECONDARY))
-    painter.fillRect(QRect(8, 8, width - 16, height - 16), accent)
-    painter.fillRect(QRect(20, 20, width - 40, height - 40), QColor(0, 0, 0, 170))
+    painter.setPen(QColor(BORDER))
+    painter.drawRect(QRect(0, 0, width - 1, height - 1))
 
     if icon_path and os.path.exists(icon_path):
         icon = QIcon(icon_path)
@@ -100,11 +96,11 @@ def _create_loading_screen(icon_path: Optional[str]) -> QSplashScreen:
     title_font = QFont("Segoe UI", 22)
     title_font.setBold(True)
     painter.setFont(title_font)
-    painter.drawText(QRect(0, height - 150, width, 40), Qt.AlignHCenter, "M.J.JARAM is starting")
+    painter.drawText(QRect(0, height - 150, width, 40), Qt.AlignHCenter, "M.J.JARAM")
 
     painter.setPen(QColor(TEXT_SECONDARY))
     painter.setFont(QFont("Segoe UI", 11))
-    painter.drawText(QRect(0, height - 110, width, 40), Qt.AlignHCenter, "Loading  UI and Services...")
+    painter.drawText(QRect(0, height - 110, width, 40), Qt.AlignHCenter, "Starting up")
     painter.end()
 
     splash = _RaisedMessageSplash(pixmap, message_y_offset=-14)
@@ -205,17 +201,8 @@ def main():
     app.setApplicationName("M.J.JARAM")
     app.setApplicationVersion(APP_FOOTER)
     app.setOrganizationName("cresqnt")
-    # Qt 6 ships a Windows 11 style that can change widget visuals. Force the
-    # Windows 10-era style for consistent UI across OS versions.
-    try:
-        from PySide6.QtWidgets import QStyleFactory
-
-        if "windowsvista" in {str(k).lower() for k in QStyleFactory.keys()}:
-            style = QStyleFactory.create("windowsvista")
-            if style is not None:
-                app.setStyle(style)
-    except Exception:
-        pass
+    # Fusion draws the ui_kit stylesheet the same on every Windows version (native styles ignore parts of it).
+    app.setStyle("Fusion")
 
     try:
         from qt_event_filters import NoEnterInPopupsFilter

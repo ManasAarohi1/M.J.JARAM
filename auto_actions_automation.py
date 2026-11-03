@@ -37,6 +37,8 @@ try:
 except Exception:  # pragma: no cover
     ImageGrab = None  # type: ignore
 
+import sol_layout
+
 
 @dataclass(frozen=True)
 class RelPoint:
@@ -44,6 +46,15 @@ class RelPoint:
 
     x: float
     y: float
+    ui: str = ""  # Sol's RNG button name (sol_layout): re-solved for every window size; x/y is the fallback
+
+
+def _rel_xy(p: RelPoint, width: int, height: int) -> Tuple[float, float]:
+    if p.ui:
+        f = sol_layout.fraction(p.ui, width, height)
+        if f is not None:
+            return f
+    return _clamp01(p.x), _clamp01(p.y)
 
 
 def _normalize_user_id_list(raw: object) -> Optional[List[str]]:
@@ -132,9 +143,8 @@ def _abs_from_rel(hwnd: int, p: RelPoint) -> Optional[Tuple[int, int]]:
     if not base:
         return None
     left, top, width, height = base
-    x = left + int(_clamp01(p.x) * width)
-    y = top + int(_clamp01(p.y) * height)
-    return x, y
+    fx, fy = _rel_xy(p, width, height)
+    return left + int(fx * width), top + int(fy * height)
 
 
 _BLOCK_USER_MOUSE_MOVE_ENABLED: bool = False
@@ -578,6 +588,23 @@ def _mouse_focus_wiggle(hwnd: int, x: int, y: int) -> None:
         pass
 
 
+# Seconds per frame of the slowest Roblox client (Auto-Actions "Lowest Roblox FPS"); set each tick.
+# Roblox only reads input once a frame, so at 1-2 FPS a click must hover and hold that long.
+# ponytail: one global FPS for every account; per-account FPS if accounts differ a lot.
+_FRAME_S: float = 1.0 / 60.0
+
+
+def _set_min_fps(cfg: Dict[str, Any], click_delay: float) -> float:
+    """Apply the FPS setting; returns the step delay (at least two frames)."""
+    global _FRAME_S
+    try:
+        fps = min(240.0, max(1.0, float(cfg.get("min_fps", 60) or 60)))
+    except Exception:
+        fps = 60.0
+    _FRAME_S = 1.0 / fps
+    return max(float(click_delay), 2.0 * _FRAME_S)
+
+
 def _mouse_left_click(hwnd: int, x: int, y: int) -> None:
     x = int(x)
     y = int(y)
@@ -600,10 +627,13 @@ def _mouse_left_click(hwnd: int, x: int, y: int) -> None:
 
     _mouse_move_instant(x, y)
     _mouse_focus_wiggle(hwnd, x, y)
+    if _FRAME_S > 0.02:
+        time.sleep(_FRAME_S)  # let a slow client see the hover first
+        _mouse_move_instant(x, y)  # back on target if the mouse was nudged meanwhile
 
     try:
         autoit.mouse_down("left")
-        time.sleep(0.01)
+        time.sleep(max(0.01, _FRAME_S))
     except Exception:
         pass
     finally:
@@ -614,12 +644,29 @@ def _mouse_left_click(hwnd: int, x: int, y: int) -> None:
         _force_left_up()
 
 
+def _send_ctrl_chord(letter: str) -> None:
+    """Ctrl+<letter>; on a slow client both keys stay down for a frame so Roblox sees the chord."""
+    if autoit is None:
+        return
+    if _FRAME_S <= 0.02:
+        autoit.send("^" + letter)
+        return
+    try:
+        autoit.send("{CTRLDOWN}")
+        time.sleep(0.01)
+        autoit.send("{" + letter + " down}")
+        time.sleep(_FRAME_S)
+    finally:
+        autoit.send("{" + letter + " up}")
+        time.sleep(0.005)
+        autoit.send("{CTRLUP}")
+
+
 def _send_ctrl_a() -> None:
-    if autoit is not None:
-        try:
-            autoit.send("^a")
-        except Exception:
-            pass
+    try:
+        _send_ctrl_chord("a")
+    except Exception:
+        pass
 
 
 def _auto_action_mouse_block_tooltip(show: bool) -> None:
@@ -729,8 +776,8 @@ def _send_unicode_text(text: str) -> None:
                 scope["changed"] = True
 
             time.sleep(0.02)
-            autoit.send("^v")
-            time.sleep(0.12)
+            _send_ctrl_chord("v")
+            time.sleep(max(0.12, 2.0 * _FRAME_S))
         except Exception:
             try:
                 autoit.send(s, mode=1)
@@ -883,7 +930,46 @@ except Exception:  # pragma: no cover - Auto-Actions must run without alerts.
             embed_description: str = "",
             screenshot: Optional[bytes] = None,
         ) -> bool:
-            return False
+            # Webhook steps (e.g. the SC/BR "used" alert) post even without the alerts module.
+            # ponytail: one daemon thread per post; a queue if posts ever pile up.
+            url = str(webhook_url or "").strip()
+            if not url:
+                return False
+            payload: Dict[str, Any] = {"content": str(message or "")[:2000]}
+            if embed_title or embed_description or screenshot:
+                embed: Dict[str, Any] = {
+                    "color": 0x7EE08A,
+                    "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                }
+                if embed_title:
+                    embed["title"] = str(embed_title)[:256]
+                if embed_description:
+                    embed["description"] = str(embed_description)[:4096]
+                if screenshot:
+                    embed["image"] = {"url": "attachment://screenshot.jpg"}
+                payload["embeds"] = [embed]
+
+            def _post() -> None:
+                log = getattr(self, "log", None) or (lambda _m: None)
+                try:
+                    import webhook_gate
+
+                    if screenshot:
+                        r = webhook_gate.post(
+                            url,
+                            data={"payload_json": json.dumps(payload)},
+                            files={"file": ("screenshot.jpg", screenshot, "image/jpeg")},
+                            timeout=15,
+                        )
+                    else:
+                        r = webhook_gate.post(url, json=payload, timeout=10)
+                    if not 200 <= r.status_code < 300:
+                        log(f"[Auto-Actions] webhook post failed: HTTP {r.status_code} {r.text[:200]}")
+                except Exception as e:
+                    log(f"[Auto-Actions] webhook post failed: {e!r}")
+
+            threading.Thread(target=_post, daemon=True, name="AutoActionWebhook").start()
+            return True
 
 
 class _MenuGateBlocked(Exception):
@@ -1077,7 +1163,7 @@ def _normalize_rel_point(raw: Any) -> Optional[RelPoint]:
     if not isinstance(raw, dict):
         return None
     try:
-        return RelPoint(float(raw.get("x", 0.0)), float(raw.get("y", 0.0)))
+        return RelPoint(float(raw.get("x", 0.0)), float(raw.get("y", 0.0)), str(raw.get("ui") or "").strip())
     except Exception:
         return None
 
@@ -1514,10 +1600,6 @@ def _autoit_key_hold_tokens(key: str) -> Tuple[str, str]:
     return "{" + name + " down}", "{" + name + " up}"
 
 
-def _send_single_key(key: str, hold_s: float = 0.0) -> None:
-    _send_keys([key], hold_s)
-
-
 def _send_keys(keys: Sequence[str], hold_s: float = 0.0) -> None:
     if autoit is None:
         return
@@ -1528,6 +1610,8 @@ def _send_keys(keys: Sequence[str], hold_s: float = 0.0) -> None:
         hold = max(0.0, float(hold_s or 0.0))
     except Exception:
         hold = 0.0
+    if _FRAME_S > 0.02:
+        hold = max(hold, _FRAME_S)  # slow client: hold every key for a frame
 
     if len(clean_keys) > 1 or hold > 0.0:
         down_up = [_autoit_key_hold_tokens(key) for key in clean_keys]
@@ -1576,9 +1660,12 @@ def _mouse_button_click(hwnd: int, x: int, y: int, *, button: str = "left", coun
             except Exception:
                 pass
             _mouse_move_instant(int(x), int(y))
+            if _FRAME_S > 0.02:
+                time.sleep(_FRAME_S)
+                _mouse_move_instant(int(x), int(y))
             try:
                 autoit.mouse_down("right")
-                time.sleep(0.01)
+                time.sleep(max(0.01, _FRAME_S))
             except Exception:
                 pass
             finally:
@@ -1591,7 +1678,7 @@ def _mouse_button_click(hwnd: int, x: int, y: int, *, button: str = "left", coun
                 except Exception:
                     pass
         if idx + 1 < count_i:
-            time.sleep(0.06)
+            time.sleep(max(0.06, _FRAME_S))
 
 
 def _mouse_button_drag(
@@ -1619,11 +1706,16 @@ def _mouse_button_drag(
         pass
 
     _mouse_move_instant(int(start_x), int(start_y))
-    time.sleep(0.02)
+    time.sleep(max(0.02, _FRAME_S))
+    if _FRAME_S > 0.02:
+        duration = max(duration, 2.0 * _FRAME_S)
+        _mouse_move_instant(int(start_x), int(start_y))
 
     up_flag = win32con.MOUSEEVENTF_RIGHTUP if button_s == "right" else win32con.MOUSEEVENTF_LEFTUP
     try:
         autoit.mouse_down(button_s)
+        if _FRAME_S > 0.02:
+            time.sleep(_FRAME_S)
         if duration <= 0.0:
             _mouse_move_instant(int(end_x), int(end_y))
         else:
@@ -1681,8 +1773,7 @@ def _window_rel_pixel_rgb(hwnd: int, point: RelPoint) -> Optional[Tuple[int, int
         crop_top = int((client_top - wt) * scale_y)
         crop_w = max(1, int(client_w * scale_x))
         crop_h = max(1, int(client_h * scale_y))
-        rel_x = max(0.0, min(1.0, float(point.x)))
-        rel_y = max(0.0, min(1.0, float(point.y)))
+        rel_x, rel_y = _rel_xy(point, client_w, client_h)
         px = max(0, min(full.width - 1, crop_left + int(rel_x * crop_w)))
         py = max(0, min(full.height - 1, crop_top + int(rel_y * crop_h)))
         return tuple(full.convert("RGB").getpixel((px, py))[:3])  # type: ignore[return-value]
@@ -1802,6 +1893,7 @@ class AutoActionEngine:
         server_label_provider: Optional[Callable[[str], str]] = None,
         ps_link_provider: Optional[Callable[[str], str]] = None,
         discord_ping_provider: Optional[Callable[[str], str]] = None,
+        account_webhooks_provider: Optional[Callable[[str], List[str]]] = None,
         log: Callable[[str], None],
         mouse_block_notify: Optional[Callable[[bool], None]] = None,
         pause_antiafk: Optional[Callable[[], None]] = None,
@@ -1822,6 +1914,7 @@ class AutoActionEngine:
         self._server_label_provider = server_label_provider
         self._ps_link_provider = ps_link_provider
         self._discord_ping_provider = discord_ping_provider
+        self._account_webhooks_provider = account_webhooks_provider
         self._log = log
         self._mouse_block_notify = mouse_block_notify
         self._pause_antiafk = pause_antiafk
@@ -1832,6 +1925,7 @@ class AutoActionEngine:
         self._ocr_text_provider = ocr_text_provider
         self._kill_user_callback = kill_user_callback
         self._alert_service = _AutoActionAlertService()
+        self._alert_service.log = log  # the fallback service reports failed posts here
 
         self._cfg_lock = threading.Lock()
         self._cfg: Dict[str, Any] = {"enabled": False}
@@ -2840,14 +2934,20 @@ class AutoActionEngine:
             if image is None:
                 return None
             output = io.BytesIO()
-            image.save(output, format="PNG")
+            image.convert("RGB").save(output, format="JPEG", quality=85)
             return output.getvalue()
         except Exception:
             return None
 
     def _send_webhook_step(self, step: ActionStep, uid: str, rule_name: str, hwnd: int = 0) -> None:
         url = str(step.webhook_url or "").strip()
-        if not url:
+        urls = [url] if url else []
+        if not urls and self._account_webhooks_provider is not None:
+            try:  # blank URL = the webhook(s) this account is in (the SC/BR presets ship blank)
+                urls = [str(u).strip() for u in (self._account_webhooks_provider(str(uid)) or []) if str(u).strip()]
+            except Exception:
+                urls = []
+        if not urls:
             try:
                 self._log(f"[Auto-Actions] {uid}: webhook step '{step.name}' skipped (missing URL).")
             except Exception:
@@ -2865,18 +2965,20 @@ class AutoActionEngine:
                 )
             except Exception:
                 pass
-        try:
-            sent = bool(
-                self._alert_service.send_step_webhook(
-                    webhook_url=url,
-                    message=message,
-                    embed_title=embed_title,
-                    embed_description=embed_description,
-                    screenshot=screenshot,
-                )
-            )
-        except Exception:
-            sent = False
+        sent = False
+        for url in urls:
+            try:
+                sent = bool(
+                    self._alert_service.send_step_webhook(
+                        webhook_url=url,
+                        message=message,
+                        embed_title=embed_title,
+                        embed_description=embed_description,
+                        screenshot=screenshot,
+                    )
+                ) or sent
+            except Exception:
+                pass
         if sent:
             try:
                 self._log(f"[Auto-Actions] {uid}: webhook step '{step.name}' sent.")
@@ -2974,7 +3076,7 @@ class AutoActionEngine:
         if step.kind == "paste":
             if bool(step.select_all):
                 _send_ctrl_a()
-                time.sleep(0.03)
+                time.sleep(max(0.03, 2.0 * _FRAME_S))
             _send_unicode_text(self._paste_text_for_user(step, uid))
             time.sleep(max(0.03, float(click_delay)))
             return False
@@ -3003,7 +3105,7 @@ class AutoActionEngine:
             delta = 120 if direction == "up" else -120
             try:
                 _mouse_move_instant(*abs_xy)
-                time.sleep(0.02)
+                time.sleep(max(0.02, _FRAME_S))
                 ctypes.windll.user32.mouse_event(int(win32con.MOUSEEVENTF_WHEEL), 0, 0, int(delta), 0)
             except Exception:
                 try:
@@ -3254,8 +3356,12 @@ class AutoActionEngine:
                 total += max(0.0, float(step.key_hold_s or 0.0)) + max(0.03, delay)
             elif kind in ("paste", "webhook", "action_row", "scroll", "kill_user"):
                 total += max(0.03, delay)
+                if kind == "paste" and _FRAME_S > 0.02:
+                    total += 3.0 * _FRAME_S
             else:
                 total += max(0.01, delay)
+                if kind == "click" and _FRAME_S > 0.02:
+                    total += 2.0 * _FRAME_S * max(1, int(step.click_count or 1))
             pc += 1
         return max(0.0, total)
 
@@ -3826,7 +3932,7 @@ class AutoActionEngine:
                 continue
 
             users = self._users_from_cfg(cfg)
-            click_delay = float(cfg.get("click_delay", 0.2) or 0.2)
+            click_delay = _set_min_fps(cfg, float(cfg.get("click_delay", 0.2) or 0.2))
             block_user_mouse_move = bool(cfg.get("disable_mouse_move", False))
             menu_debug = bool(cfg.get("menu_debug", False))
             if not users:
@@ -4092,7 +4198,7 @@ class AutoActionEngine:
                 self._log("[Auto-Actions] Test: user appears to be in the main menu (or status unknown); skipping.")
                 return False
 
-        click_delay = float(cfg.get("click_delay", 0.2) or 0.2)
+        click_delay = _set_min_fps(cfg, float(cfg.get("click_delay", 0.2) or 0.2))
         block_user_mouse_move = bool(cfg.get("disable_mouse_move", False))
         menu_debug = bool(cfg.get("menu_debug", False))
 

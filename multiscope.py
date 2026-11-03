@@ -39,7 +39,7 @@ except Exception:
         return int(0x3BA55D), ""     # default color, empty thumbnail
     def biome_names() -> list[str]:
         return ["NORMAL"]
-from version import APP_FOOTER  # single source of truth: version.py
+APP_FOOTER = "M.J.JARAM JX 2x71"
 HARD_EVERYONE_BIOMES = {"GLITCHED", "DREAMSPACE", "CYBERSPACE"}
 
 # Webhook send retry budget per hook, by biome tier. Priority biomes are rare and
@@ -64,6 +64,9 @@ _LOOKUP_SAVE_LOCK = threading.Lock()
 # Helpers
 # ------------------------------------------------------------------------------
 
+import webhook_gate
+
+
 def _post_webhook(
     url: str,
     payload: dict,
@@ -82,40 +85,14 @@ def _post_webhook(
     """
     if not url:
         return False
+    # webhook_gate owns every retry: 429s wait out retry_after, 5xx / network errors retry attempts-1 times.
     try:
-        import requests
-    except Exception:
-        return False
-    n = max(1, int(attempts))
-    last = "no attempt"
-    for i in range(n):
-        try:
-            r = requests.post(url, json=payload, timeout=10)
-            code = r.status_code
-            if 200 <= code < 300:
-                return True
-            if code == 429:
-                last = "HTTP 429 (rate limited)"
-                if i < n - 1:
-                    try:
-                        ra = float(r.headers.get("Retry-After") or 0)
-                    except Exception:
-                        ra = 0.0
-                    _t.sleep(min(max(ra, 1.0), 15.0))
-                continue
-            if 500 <= code < 600:
-                last = f"HTTP {code}"
-                if i < n - 1:
-                    _t.sleep(min(1.5 * (i + 1), 8.0))
-                continue
-            # Non-retryable (bad/deleted hook, malformed payload): give up now.
-            last = f"HTTP {code}"
-            break
-        except Exception as e:
-            last = type(e).__name__ or "network error"
-            if i < n - 1:
-                _t.sleep(min(1.0 * (i + 1), 6.0))
-            continue
+        r = webhook_gate.post(url, json=payload, timeout=10, retries=max(1, int(attempts)) - 1)
+        if 200 <= r.status_code < 300:
+            return True
+        last = "HTTP 429 (rate limited)" if r.status_code == 429 else f"HTTP {r.status_code}"
+    except Exception as e:
+        last = type(e).__name__ or "network error"
     if on_fail is not None:
         try:
             on_fail(label, last)
@@ -215,9 +192,6 @@ def _extract_rpc_entries_from_text(
         start = j + max(1, int(consumed))
     return out
 
-def _extract_rpc_jsons_from_text(text: str) -> List[dict]:
-    return [rpc for rpc, _ts in _extract_rpc_entries_from_text(text)]
-
 def _extract_biome_from_rpc(rpc: dict) -> Optional[str]:
     """STRICT: use data.largeImage.hoverText only."""
     if not isinstance(rpc, dict):
@@ -279,69 +253,32 @@ def _extract_in_menu_from_rpc(rpc: dict) -> Optional[bool]:
 
 
 
-# Merchant detection modes.
-MERCHANT_MODE_ASSET_ID = "asset_id"
-MERCHANT_MODE_LEGACY_CHAT = "legacy_chat"
-
 MERCHANT_ASSET_IDS = {
     "18247420806": "Jester",
     "18247165978": "Mari",
     "97148159887178": "Rin",
+    # Sinister S. boss: jump + walk animations, either one counts (deduped per server).
+    "136698315787897": "Sinister S.",
+    "79637662709262": "Sinister S.",
 }
-
-# Legacy merchant chat lines - tolerant to optional colon after [Merchant]
-# and variable ms precision.
-MERCHANT_RE = re.compile(
-    r"^(?P<full_line>"
-    r"(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{0,6})?Z),"  # allow 0-6 ms digits
-    r"[^\n]*?\[(?:Merchant|Merchants)\]:?\s*"                               # optional colon after [Merchant]
-    r"(?P<merchant_name>Jester|Mari|Rin)\b"
-    r"[^\n]*?\b(arrived|spawn(?:ed|ing)?|appeared)\b"
-    r"[^\n]*"
-    r")$",
-    re.IGNORECASE | re.MULTILINE
-)
+# ponytail: one alert per server per boss visit; widen if it re-alerts mid-fight.
+SINISTER_DEDUPE_WINDOW_S = 300.0
 
 # Merchant asset-id lines - only the animation asset ID matters; the
 # Workspace.Map.* segment is intentionally ignored because it is random.
 MERCHANT_ASSET_RE = re.compile(
     r"^(?P<full_line>"
     r"(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{0,6})?Z),"
-    r"[^\n]*?rbxassetid://(?P<asset_id>97148159887178|18247420806|18247165978)"
+    r"[^\n]*?rbxassetid://(?P<asset_id>97148159887178|18247420806|18247165978|136698315787897|79637662709262)"
     r"[^\n]*"
     r")$",
     re.IGNORECASE | re.MULTILINE
 )
 
 MERCHANT_ASSET_PREFILTERS = tuple(f"rbxassetid://{asset_id}".lower() for asset_id in MERCHANT_ASSET_IDS)
-MERCHANT_LEGACY_PREFILTERS = ("[merchant]", "[merchants]")
 
 
-def _normalize_merchant_detection_mode(mode: object) -> str:
-    raw = str(mode or "").strip().lower()
-    if raw in {"legacy", "chat", "merchant", "merchant_chat", MERCHANT_MODE_LEGACY_CHAT}:
-        return MERCHANT_MODE_LEGACY_CHAT
-    return MERCHANT_MODE_ASSET_ID
-
-
-def _merchant_prefilters_for_mode(mode: object) -> tuple[str, ...]:
-    if _normalize_merchant_detection_mode(mode) == MERCHANT_MODE_LEGACY_CHAT:
-        return MERCHANT_LEGACY_PREFILTERS
-    return MERCHANT_ASSET_PREFILTERS
-
-
-def _iter_merchant_matches(text: str, mode: object) -> List[dict]:
-    normalized_mode = _normalize_merchant_detection_mode(mode)
-    if normalized_mode == MERCHANT_MODE_LEGACY_CHAT:
-        return [
-            {
-                "full_line": m.group("full_line"),
-                "timestamp": m.group("timestamp"),
-                "merchant_name": m.group("merchant_name").title(),
-            }
-            for m in MERCHANT_RE.finditer(text)
-        ]
-
+def _iter_merchant_matches(text: str) -> List[dict]:
     out: List[dict] = []
     for m in MERCHANT_ASSET_RE.finditer(text):
         asset_id = str(m.group("asset_id") or "").strip()
@@ -764,15 +701,6 @@ class Cursor:
 # ------------------------------------------------------------------------------
 
 class MultiScopeEngine:
-    def _normalized_server_key(self, uid: str) -> str:
-        label = (self._get_server_label(uid) or "").strip()
-        u = label.upper()
-        if u.startswith("DISCONNECTED") or u.startswith("OFFLINE"):
-            return "Disconnected"  # single, friendly pool name
-        if u.startswith("PUBLIC:"):
-            return f"{label} #{uid}"
-        return label or f"Unknown #{uid}"
-
     def __init__(
         self,
         *,
@@ -832,7 +760,6 @@ class MultiScopeEngine:
         self._merchant_hook: str = ""
         self._merchant_filters = {"Jester": True, "Mari": True, "Rin": True}
         self._ping_map = {"Jester": "", "Mari": "", "Rin": ""}
-        self._merchant_detection_mode = MERCHANT_MODE_ASSET_ID
         self._disable_log_based_merchant_detection = False
 
         self._first_merchant_scan_done: Set[str] = set()
@@ -843,6 +770,7 @@ class MultiScopeEngine:
         # Webhooks
         self._biome_webhooks: List[dict] = []
         self._player_tracker_hook: str = ""
+        self._sinister_hook: str = ""
         self._skip_webhook_unknown_context = False
 
         self._lock = threading.Lock()
@@ -884,6 +812,10 @@ class MultiScopeEngine:
 
         # Webhook delivery remains off the reader pool.
         self._send_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ms-send")
+        if webhook_gate.on_rate_limited is None:  # engine runs in its own process: tell the GUI
+            webhook_gate.on_rate_limited = lambda u, w, g: self._emit_event(
+                "webhook_rate_limited", "", json.dumps([u, w, g])
+            )
 
         # Webhook-failure alerting: when a biome send exhausts its retries we push
         # ONE throttled "webhook_failed" event to the GUI (which alerts the CAP
@@ -934,7 +866,6 @@ class MultiScopeEngine:
         jester_ping: str = "",
         mari_ping: str = "",
         rin_ping: str = "",
-        merchant_detection_mode: str = MERCHANT_MODE_ASSET_ID,
         disable_log_based_merchant_detection: bool = False,
         merchant_rate_limit: float = 15.0,   # kept for backward-compat; ignored
         biome_min_interval: float = 2.0,
@@ -943,6 +874,7 @@ class MultiScopeEngine:
         skip_webhook_unknown_context: bool = False,
         in_menu_none_timeout_seconds: float = 120.0,
         player_tracker_hook: str = "",
+        sinister_hook: str = "",
     ) -> None:
         lock_enforced = self._is_bm_lock_enforced()
         lock_disabled = not lock_enforced
@@ -1013,7 +945,6 @@ class MultiScopeEngine:
             "Rin": bool(enable_rin),
         }
         self._ping_map = {"Jester": jester_ping or "", "Mari": mari_ping or "", "Rin": rin_ping or ""}
-        self._merchant_detection_mode = _normalize_merchant_detection_mode(merchant_detection_mode)
         self._disable_log_based_merchant_detection = bool(disable_log_based_merchant_detection)
         # --- ignore merchant_rate_limit entirely (no cooldown)
         self._biome_min_interval = float(biome_min_interval or 2.0)
@@ -1024,6 +955,7 @@ class MultiScopeEngine:
         self._lock_forced_biomes = forced_biomes
         self._skip_webhook_unknown_context = bool(skip_webhook_unknown_context)
         self._player_tracker_hook = (player_tracker_hook or "").strip()
+        self._sinister_hook = (sinister_hook or "").strip()
         try:
             self._in_menu_none_timeout_seconds = max(
                 1.0,
@@ -1583,7 +1515,7 @@ class MultiScopeEngine:
 
         # merchant seed (no notify) +' seed *scope* timestamps to avoid retro spam across users
         if not self._disable_log_based_merchant_detection:
-            matches = _iter_merchant_matches(chunk, self._merchant_detection_mode)
+            matches = _iter_merchant_matches(chunk)
             if matches:
                 scope_key = self._server_key_for(uid)
                 self._last_merchant_ts_by_scope.setdefault(scope_key, {})
@@ -1961,10 +1893,6 @@ class MultiScopeEngine:
             self._emit_event("disconnect", uid, last_payload)
         return True
 
-    def _scan_disconnect_in_chunk(self, uid: str, chunk: str) -> bool:
-        """Check a just-read log chunk for Roblox disconnect signals."""
-        return self._scan_disconnect_in_text(uid, chunk)
-
     def begin_handoff(self, donor_uid: str, spare_uid: str) -> None:
         with self._lock:
             self._handoffs[donor_uid] = spare_uid
@@ -2120,17 +2048,6 @@ class MultiScopeEngine:
                 self._last_biome_post_by_scope.pop(key, None)
                 self._last_merchant_ts_by_scope.pop(key, None)
                 self._scopes.pop(key, None)
-
-    def _resolve_owner(self, uid: str, server_label: str) -> str:
-        """
-        Prefer explicit owner callback; otherwise fall back to detector username.
-        Kept simple so we don't disturb existing logic elsewhere.
-        """
-        owner = (self._get_owner(uid) or "").strip()
-        if owner:
-            return owner
-        # fallback: current detecting user
-        return (self._get_username(uid) or "Unknown").strip()
 
     def _should_skip_webhook(self, owner_raw: str, server_label: str, ps_link: str) -> bool:
         if not self._skip_webhook_unknown_context:
@@ -2470,7 +2387,9 @@ class MultiScopeEngine:
         scope.users.add(uid)
         self._emit_event("merchant", str(uid), str(who))
 
-        if not self._merchant_hook:
+        # Sinister S. (boss) has its own webhook; blank = the merchant webhook.
+        hook = (self._sinister_hook if who == "Sinister S." else "") or self._merchant_hook
+        if not hook:
             return
         if not self._merchant_filters.get(who, True):
             return
@@ -2482,8 +2401,8 @@ class MultiScopeEngine:
         if self._should_skip_webhook(owner_raw, server_label, ps_link):
             return
 
-        emojis = {"Jester": "🃏", "Mari": "🛍️", "Rin": "🦊"}
-        colors = {"Jester": 0xA352FF, "Mari": 0xFF82AB, "Rin": 0xFF9F1C}
+        emojis = {"Jester": "🃏", "Mari": "🛍️", "Rin": "🦊", "Sinister S.": "💀"}
+        colors = {"Jester": 0xA352FF, "Mari": 0xFF82AB, "Rin": 0xFF9F1C, "Sinister S.": 0x8B0000}
         title  = f"{emojis.get(who,'📣')} {who} Has Arrived!"
         ts     = int(event_time_utc.timestamp())
         ts_full = f"<t:{ts}:D> • <t:{ts}:T>"
@@ -2505,7 +2424,7 @@ class MultiScopeEngine:
         }]}
 
         try:
-            self._send_executor.submit(_post_webhook, self._merchant_hook, payload)
+            self._send_executor.submit(_post_webhook, hook, payload)
         except Exception:
             pass
         # START TEMP BLOCK WINDOW for Jester
@@ -2570,7 +2489,7 @@ class MultiScopeEngine:
             or "disconnect" in lower
             or "connection lost" in lower
             or (self._player_tracker_hook and "humanoid.clothes:" in lower)
-            or any(token in lower for token in _merchant_prefilters_for_mode(self._merchant_detection_mode))
+            or any(token in lower for token in MERCHANT_ASSET_PREFILTERS)
         )
         if needs_scope_order:
             with self._tail_scope_lock_for(uid):
@@ -2627,9 +2546,9 @@ class MultiScopeEngine:
         if (
             not self._disable_log_based_merchant_detection
             and ts_epoch is not None
-            and any(token in lower for token in _merchant_prefilters_for_mode(self._merchant_detection_mode))
+            and any(token in lower for token in MERCHANT_ASSET_PREFILTERS)
         ):
-            matches = _iter_merchant_matches(line.rstrip("\r\n"), self._merchant_detection_mode)
+            matches = _iter_merchant_matches(line.rstrip("\r\n"))
             scope_key = self._server_key_for(uid)
             self._scopes.setdefault(scope_key, ServerScope(scope_key)).users.add(uid)
             for match in matches:
@@ -2646,7 +2565,10 @@ class MultiScopeEngine:
                     byte_end,
                     f"merchant:{who.lower()}",
                 )
-                if claimed and not self._scope_dedupe_merchant_ts(scope_key, who, float(ts_epoch), window=10.0):
+                if claimed and not self._scope_dedupe_merchant_ts(
+                    scope_key, who, float(ts_epoch),
+                    window=SINISTER_DEDUPE_WINDOW_S if who == "Sinister S." else 10.0,
+                ):
                     self._emit_merchant(uid, who, event_dt, str(match.get("full_line") or ""))
             self._first_merchant_scan_done.add(uid)
 
@@ -2846,7 +2768,7 @@ class MultiScopeEngine:
                 or R_DISC_NOTIFY.search(tail_text)
                 or R_DISC_SENDING.search(tail_text)
                 or R_CONN_LOST.search(tail_text)
-                or _iter_merchant_matches(tail_text, self._merchant_detection_mode)
+                or _iter_merchant_matches(tail_text)
                 or _extract_rpc_entries_from_text(tail_text)
             )
             if tail_is_complete:
@@ -3639,57 +3561,6 @@ class MultiScopeEngine:
             })
         return out
     
-    def _throttled_log(self, key: str, msg: str, every: float = 10.0) -> None:
-        import time
-        if not hasattr(self, "_last_log_by_key"):
-            self._last_log_by_key = {}
-        now = time.time()
-        last = self._last_log_by_key.get(key, 0.0)
-        if (now - last) >= every:
-            self._last_log_by_key[key] = now
-            self._log(msg)
-
-    def _should_disconnect_lookback(self, uid: str) -> bool:
-        """
-        Guard for disconnect lookback scans:
-        - Avoid triggering restarts for idle users when MultiScope starts.
-        - Allow for users that are active OR recently active (PID died but log flushed a disconnect).
-        """
-        try:
-            key = self._server_key_for(uid)
-            if key == "Disconnected":
-                return False
-        except Exception:
-            pass
-
-        try:
-            st = (self._status_snapshot or {}).get(uid)
-        except Exception:
-            st = None
-        if not isinstance(st, dict):
-            return False
-
-        try:
-            pids = st.get("pids") or []
-        except Exception:
-            pids = []
-        if pids:
-            return True
-
-        try:
-            last_active = float(st.get("last_active", 0) or 0)
-        except Exception:
-            last_active = 0.0
-
-        try:
-            now_t = float(getattr(self, "_status_snapshot_ts", 0.0) or 0.0) or time.time()
-        except Exception:
-            now_t = time.time()
-
-        # If the user was active recently, still allow the lookback (disconnect may have been written
-        # before we switched to the newest log file, or after the PID already died).
-        return bool(last_active and (now_t - last_active) <= 180.0)
-
     def _process_created_at_for_disconnect(self, uid: str) -> Optional[float]:
         """Return the newest live process creation time supplied by the manager."""
         try:

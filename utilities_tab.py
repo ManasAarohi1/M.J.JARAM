@@ -220,35 +220,9 @@ def _coerce_targets_to_ids_and_names(lines: List[str], username_cache: Dict[str,
     return sorted(ids), id_to_raw, unresolved
 
 # ---------------- Selenium session ----------------
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.webdriver import WebDriver as ChromeWebDriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-
-def _make_driver(cookie: str, headless: bool) -> ChromeWebDriver:
-    opts = Options()
-    if headless:
-        opts.add_argument("--headless=new")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_argument("--start-maximized")
-    d = ChromeWebDriver(options=opts)
-    d.get("https://www.roblox.com/")
-    d.add_cookie({
-        "name": ".ROBLOSECURITY",
-        "value": cookie,
-        "domain": ".roblox.com",
-        "path": "/",
-        "secure": True,
-        "httpOnly": True,
-    })
-    d.get("https://www.roblox.com/home")
-    try:
-        WebDriverWait(d, 7).until(EC.invisibility_of_element_located((By.ID, "sign-up-button")))
-    except Exception:
-        d.quit()
-        raise RuntimeError("Login failed (guest UI still present).")
-    return d
 
 # ---------------- Blocking flow ----------------
 def _more_button(driver):
@@ -273,46 +247,6 @@ def _confirm_btn(driver, label: str, timeout: float = 3.0):
     except Exception:
         return None
 
-def _block_user(driver, user_id: str) -> str:
-    driver.get(f"https://www.roblox.com/users/{user_id}/profile")
-    try:
-        WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-    except Exception:
-        return "failed"
-    if "/login" in driver.current_url.lower():
-        return "bad_cookie"
-
-    more = _more_button(driver)
-    if not more:
-        return "failed"
-    driver.execute_script("arguments[0].click();", more)
-    try:
-        li = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.ID, "block-button")))
-        driver.execute_script("arguments[0].click();", li)
-    except Exception:
-        try:
-            driver.execute_script("arguments[0].click();", more)
-            li = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.ID, "block-button")))
-            driver.execute_script("arguments[0].click();", li)
-        except Exception:
-            return "failed"
-
-    if _confirm_btn(driver, "Unblock", timeout=2.0):
-        return "already_blocked"
-
-    ok = _confirm_btn(driver, "Block", timeout=3.0)
-    if ok:
-        driver.execute_script("arguments[0].click();", ok)
-        time.sleep(0.15)
-        return "blocked"
-
-    mb = _more_button(driver)
-    if mb:
-        driver.execute_script("arguments[0].click();", mb)
-        if _confirm_btn(driver, "Unblock", timeout=1.5):
-            return "already_blocked"
-    return "failed"
-
 # ---------------- Unblocking helpers (username-based DOM targeting) ----------------
 _BLOCKED_URL = "https://www.roblox.com/my/account#!/privacy/BlockedUsers"
 
@@ -323,84 +257,6 @@ def _blocked_username_xpath(uname_lower: str) -> str:
         "translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')="
         f"'@{uname_lower}']]"
     )
-
-def _find_blocked_node_by_name(driver, uname_lower: str, quick_only: bool = True):
-    x_expr = _blocked_username_xpath(uname_lower)
-    try:
-        return WebDriverWait(driver, 3).until(
-            EC.presence_of_element_located((By.XPATH, x_expr))
-        )
-    except Exception:
-        if quick_only:
-            return None
-        last_h = 0
-        for _ in range(6):
-            driver.execute_script("window.scrollBy(0, Math.floor(window.innerHeight*0.9));")
-            time.sleep(0.15)
-            try:
-                return driver.find_element(By.XPATH, x_expr)
-            except Exception:
-                h = driver.execute_script("return document.body.scrollHeight;")
-                if h == last_h:
-                    break
-                last_h = h
-        return None
-
-def _fully_load_then_find_by_name(driver, uname_lower: str):
-    x_expr = _blocked_username_xpath(uname_lower)
-    last_h = -1
-    stable = 0
-    for _ in range(12):
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(0.2)
-        h = driver.execute_script("return document.body.scrollHeight;")
-        if h == last_h:
-            stable += 1
-            if stable >= 2:
-                break
-        else:
-            stable = 0
-        last_h = h
-    try:
-        return driver.find_element(By.XPATH, x_expr)
-    except Exception:
-        return None
-
-def _unblock_display_node(driver, node) -> bool:
-    try:
-        btn = node.find_element(By.CSS_SELECTOR, "button.user-blocking-btn")
-        driver.execute_script("arguments[0].click();", btn)
-        try:
-            confirm = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(@class,'btn-primary') and normalize-space()='Unblock']"))
-            )
-            driver.execute_script("arguments[0].click();", confirm)
-            try:
-                WebDriverWait(driver, 6).until(EC.staleness_of(node))
-                return True
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        time.sleep(0.25)
-        for _ in range(3):
-            try:
-                WebDriverWait(driver, 1.5).until(EC.staleness_of(node))
-                return True
-            except Exception:
-                pass
-            driver.execute_script("window.scrollBy(0, Math.floor(window.innerHeight*0.5));")
-            time.sleep(0.15)
-
-        try:
-            uname_lower = node.find_element(By.CSS_SELECTOR, ".blocked-user-name .text-secondary").text.lstrip("@").lower()
-            driver.find_element(By.XPATH, _blocked_username_xpath(uname_lower))
-            return False
-        except Exception:
-            return True
-    except Exception:
-        return False
 
 # ---------------- Roblox API (Blocking/Unblocking) ----------------
 _BLOCKING_API_BASE = "https://apis.roblox.com/user-blocking-api/v1/users"
@@ -2174,11 +2030,6 @@ def build_utilities_widget(self) -> QWidget:
     run_unblock_btn.clicked.connect(_start_unblock)
     run_psl_btn.clicked.connect(_start_psl)
     return tab
-
-
-def setup_UTILITIES_tab(self):
-    tab = build_utilities_widget(self)
-    self.tab_widget.addTab(tab, "Utilities")
 
 
 def shutdown_UTILITIES_tab(self, timeout_ms: int = 5000) -> bool:

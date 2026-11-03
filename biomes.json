@@ -100,7 +100,17 @@
     },
     "Incinerator": {
         "color": "0Xff6a00",
-        "thumbnail_url": "https://raw.githubusercontent.com/ManasAarohi1/M.J.JARAM/main/Icons/Incinerator%20Biome.png",
+        "thumbnail_url": "",
+        "Timer": null
+    },
+    "LOST FOREST": {
+        "color": "0x2E8B57",
+        "thumbnail_url": "",
+        "Timer": null
+    },
+    "THE RADIANT FOREST": {
+        "color": "0xFFF1A8",
+        "thumbnail_url": "",
         "Timer": null
     }
 

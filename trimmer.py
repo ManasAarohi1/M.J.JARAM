@@ -24,20 +24,8 @@ except Exception:  # pragma: no cover
     _native_trim_targets = None
     _USING_NATIVE = False
 
-from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QGroupBox,
-    QLabel,
-    QSpinBox,
-    QDoubleSpinBox,
-    QCheckBox,
-    QTextEdit,
-    QScrollArea,
-)
+from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QFont
 
 
 TARGET_PROCESS_NAME = "RobloxPlayerBeta.exe"
@@ -234,73 +222,6 @@ class TrimmerTab(QWidget):
             pass
         self._update_status()
 
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-
-        header = QLabel("Trimmer")
-        header.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-        layout.addWidget(header)
-
-        settings_group = QGroupBox("Settings")
-        settings_layout = QHBoxLayout(settings_group)
-
-        enabled_col = QVBoxLayout()
-        self.enabled_chk = QCheckBox("Enabled")
-        enabled_col.addWidget(self.enabled_chk)
-        enabled_col.addStretch(1)
-        settings_layout.addLayout(enabled_col)
-
-        settings_layout.addSpacing(16)
-
-        interval_col = QVBoxLayout()
-        interval_col.addWidget(QLabel("Trim interval (seconds):"))
-        self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(1, 3600)
-        self.interval_spin.setValue(15)
-        interval_col.addWidget(self.interval_spin)
-        settings_layout.addLayout(interval_col)
-
-        settings_layout.addSpacing(16)
-
-        threshold_col = QVBoxLayout()
-        self.threshold_chk = QCheckBox("Use threshold (MB >=)")
-        self.threshold_chk.setChecked(True)
-        threshold_col.addWidget(self.threshold_chk)
-        self.threshold_spin = QDoubleSpinBox()
-        self.threshold_spin.setRange(1.0, 65536.0)
-        self.threshold_spin.setDecimals(1)
-        self.threshold_spin.setValue(1024.0)
-        threshold_col.addWidget(self.threshold_spin)
-        settings_layout.addLayout(threshold_col)
-
-        settings_layout.addStretch(1)
-        layout.addWidget(settings_group)
-
-        self.status_lbl = QLabel("Status: Disabled")
-        layout.addWidget(self.status_lbl)
-
-        log_group = QGroupBox("Log")
-        log_layout = QVBoxLayout(log_group)
-        self.log_box = QTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setFont(QFont("Consolas", 10))
-        self.log_box.setMinimumHeight(200)
-        log_layout.addWidget(self.log_box)
-        layout.addWidget(log_group)
-
-        layout.addStretch(1)
-
-        self.interval_spin.valueChanged.connect(self._on_ui_changed)
-        self.threshold_chk.toggled.connect(self._on_ui_changed)
-        self.threshold_spin.valueChanged.connect(self._on_ui_changed)
-        self.enabled_chk.toggled.connect(self._on_enabled_toggled)
-
-    def _append_log(self, msg: str):
-        try:
-            self.log_box.append(str(msg))
-        except Exception:
-            pass
-
     def _queue_log(self, msg: str):
         try:
             timestamp = time.strftime("%H:%M:%S")
@@ -455,13 +376,3 @@ class TrimmerTab(QWidget):
         except Exception:
             pass
 
-
-def setup_TRIMMER_tab(main_window):
-    tab = TrimmerTab(getattr(main_window, "config_manager", None))
-    main_window.trimmer_tab = tab
-
-    scroll = QScrollArea()
-    scroll.setWidgetResizable(True)
-    scroll.setWidget(tab)
-
-    main_window.tab_widget.addTab(scroll, "Trimmer")

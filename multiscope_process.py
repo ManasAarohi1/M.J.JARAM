@@ -186,9 +186,6 @@ def _multiscope_worker_main(cmd_q: mp.Queue, out_q: mp.Queue) -> None:
                             jester_ping=str(pending_configure_webhooks.get("jester_ping") or ""),
                             mari_ping=str(pending_configure_webhooks.get("mari_ping") or ""),
                             rin_ping=str(pending_configure_webhooks.get("rin_ping") or ""),
-                            merchant_detection_mode=str(
-                                pending_configure_webhooks.get("merchant_detection_mode") or "asset_id"
-                            ),
                             disable_log_based_merchant_detection=bool(
                                 pending_configure_webhooks.get("disable_log_based_merchant_detection", False)
                             ),
@@ -203,6 +200,7 @@ def _multiscope_worker_main(cmd_q: mp.Queue, out_q: mp.Queue) -> None:
                                 or 120.0
                             ),
                             player_tracker_hook=str(pending_configure_webhooks.get("player_tracker_hook") or ""),
+                            sinister_hook=str(pending_configure_webhooks.get("sinister_hook") or ""),
                         )
                 except Exception:
                     pass
@@ -286,7 +284,6 @@ def _multiscope_worker_main(cmd_q: mp.Queue, out_q: mp.Queue) -> None:
                     jester_ping=str(cmd.get("jester_ping") or ""),
                     mari_ping=str(cmd.get("mari_ping") or ""),
                     rin_ping=str(cmd.get("rin_ping") or ""),
-                    merchant_detection_mode=str(cmd.get("merchant_detection_mode") or "asset_id"),
                     disable_log_based_merchant_detection=bool(
                         cmd.get("disable_log_based_merchant_detection", False)
                     ),
@@ -298,6 +295,7 @@ def _multiscope_worker_main(cmd_q: mp.Queue, out_q: mp.Queue) -> None:
                         cmd.get("in_menu_none_timeout_seconds", 120.0) or 120.0
                     ),
                     player_tracker_hook=str(cmd.get("player_tracker_hook") or ""),
+                    sinister_hook=str(cmd.get("sinister_hook") or ""),
                 )
 
             elif ctype == "recover_user_log_tracking":
@@ -564,7 +562,6 @@ class MultiScopeProcessProxy:
         jester_ping: str = "",
         mari_ping: str = "",
         rin_ping: str = "",
-        merchant_detection_mode: str = "asset_id",
         disable_log_based_merchant_detection: bool = False,
         merchant_rate_limit: float = 15.0,
         biome_min_interval: float = 2.0,
@@ -572,6 +569,7 @@ class MultiScopeProcessProxy:
         skip_webhook_unknown_context: bool = False,
         in_menu_none_timeout_seconds: float = 120.0,
         player_tracker_hook: str = "",
+        sinister_hook: str = "",
     ) -> None:
         self._drain_out_queue()
         self._send_cmd(
@@ -585,7 +583,6 @@ class MultiScopeProcessProxy:
                 "jester_ping": jester_ping or "",
                 "mari_ping": mari_ping or "",
                 "rin_ping": rin_ping or "",
-                "merchant_detection_mode": str(merchant_detection_mode or "asset_id"),
                 "disable_log_based_merchant_detection": bool(disable_log_based_merchant_detection),
                 "merchant_rate_limit": float(merchant_rate_limit or 0.0),
                 "biome_min_interval": float(biome_min_interval or 0.0),
@@ -593,6 +590,7 @@ class MultiScopeProcessProxy:
                 "skip_webhook_unknown_context": bool(skip_webhook_unknown_context),
                 "in_menu_none_timeout_seconds": float(in_menu_none_timeout_seconds),
                 "player_tracker_hook": player_tracker_hook or "",
+                "sinister_hook": sinister_hook or "",
             }
         )
 

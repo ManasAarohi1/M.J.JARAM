@@ -1,5 +1,6 @@
 # timeout_monitor.py
-import psutil, time, threading, queue, requests, sys, traceback
+import psutil, time, threading, queue, sys, traceback
+import webhook_gate
 
 TARGET_NAME = "RobloxPlayerBeta.exe"
 
@@ -37,10 +38,6 @@ class TimeoutMonitor:
             self.thread.join(timeout=4)
 
     # ── internal helpers ────────────────────────────────────────────────
-    def _seconds_running(self, p: psutil.Process) -> float:
-        try:  return time.time() - p.create_time()
-        except (psutil.NoSuchProcess, psutil.AccessDenied): return 0.0
-
     def _kill(self, p: psutil.Process, reason: str):
         try:
             p.kill()
@@ -51,7 +48,7 @@ class TimeoutMonitor:
     def _send_webhook(self):
         if not self.webhook_url: return
         try:
-            requests.post(self.webhook_url,
+            webhook_gate.post(self.webhook_url, max_wait_s=8,
                           json={"content": self.ping_message},
                           timeout=8)
         except Exception:

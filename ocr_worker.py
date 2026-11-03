@@ -7,7 +7,7 @@ import re
 import threading
 import time
 import traceback
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 try:
     from concurrent.futures.process import BrokenProcessPool
 except Exception:  # pragma: no cover
@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from multiprocessing import get_context
 
 import numpy as np
-import requests
+import webhook_gate
 from PIL import Image, ImageGrab, ImageOps
 from PySide6.QtCore import QThread, Signal
 
@@ -817,10 +817,6 @@ def _fuzzy_ratio(line: str, target: str) -> float:
     return difflib.SequenceMatcher(None, l, t).ratio()
 
 
-def _fuzzy_match(line: str, target: str, threshold: float = 0.7) -> bool:
-    return _fuzzy_ratio(line, target) >= threshold
-
-
 def _normalize_filter_name(raw: str) -> str:
     name = str(raw or "").strip()
     lower = name.lower()
@@ -1227,10 +1223,6 @@ def detect_merchant_type(text: str) -> Optional[str]:
     return None
 
 
-def contains_jester_message(text: str) -> bool:
-    return detect_merchant_type(text) == "jester"
-
-
 def enum_roblox_windows(process_names: Optional[List[str]] = None) -> List[RobloxWindow]:
     if process_names is None:
         process_names = ["RobloxPlayerBeta.exe"]
@@ -1437,16 +1429,6 @@ def preprocess_for_ocr_with_stats(image: Image.Image, color_filters: List[ColorF
 
 def preprocess_for_ocr(image: Image.Image, color_filters: List[ColorFilter]) -> Image.Image:
     return preprocess_for_ocr_with_stats(image, color_filters).image
-
-def _active_color_filters_from_specs(filter_specs: List[Dict[str, Any]]) -> List[ColorFilter]:
-    colors: List[ColorFilter] = []
-    for spec in filter_specs or []:
-        try:
-            colors.append(_filter_color_from_spec(spec))
-        except Exception:
-            continue
-    return colors
-
 
 def _roi_from_cfg(roi_cfg: Dict[str, Any]) -> Optional[Tuple[float, float, float, float]]:
     try:
@@ -2092,12 +2074,6 @@ class OCRWorker(QThread):
             self._shutdown_send_pool()
 
     # ---------------------- detection helpers ---------------------
-    def _preprocess_image(self, image: Image.Image, filter_specs: List[Dict[str, Any]]) -> Image.Image:
-        if not self._use_preprocess:
-            return image
-
-        return _prepare_filter_ocr_image(image, filter_specs)
-
     def _handle_detection(self, merchant: str, pid: int, raw_img: Image.Image) -> None:
         ctx = self._context_provider(pid) if self._context_provider else {}
         try:
@@ -2185,7 +2161,7 @@ class OCRWorker(QThread):
 
         def _send() -> None:
             try:
-                requests.post(url, data={"payload_json": json.dumps(payload)}, files=files, timeout=10)
+                webhook_gate.post(url, data={"payload_json": json.dumps(payload)}, files=files, timeout=10)
             except Exception as e:
                 self._log(f"[Webhook] Error posting detection: {e}")
 
@@ -2259,9 +2235,9 @@ class OCRWorker(QThread):
                     files = {
                         "chat.png": ("chat.png", _image_bytes(raw_img), "image/png"),
                     }
-                    requests.post(url, data={"payload_json": json.dumps(payload)}, files=files, timeout=10)
+                    webhook_gate.post(url, data={"payload_json": json.dumps(payload)}, files=files, timeout=10)
                 else:
-                    requests.post(url, json=payload, timeout=10)
+                    webhook_gate.post(url, json=payload, timeout=10)
             except Exception as e:
                 self._log(f"[Webhook] Error posting filter detection: {e}")
 
