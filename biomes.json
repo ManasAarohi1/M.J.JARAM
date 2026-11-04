@@ -45,9 +45,9 @@
         "Timer": "99"
     },
     "Cyberspace": {
-        "color": "0x011ab7",
-        "thumbnail_url": "https://at-cdn-s01.audiotool.com/2013/06/13/documents/zW2OHriFzthb06Ty5h9tUxEGgEw/0/cover256x256-f161eb9cd16c4786bbb3c78292e7131f.jpg",
-        "Timer": "150"
+        "color": "0x0064CE",
+        "thumbnail_url": "https://raw.githubusercontent.com/Jirach-1/J.JARAM/refs/heads/main/Icons/Cyberspace%20Biome.png",
+        "Timer": "720"
     },
     "GLITCHED": {
         "color": "0xbfff00",
@@ -68,7 +68,7 @@
         "color": "0x00ff00",
         "thumbnail_url": "https://static.wikia.nocookie.net/sol-rng/images/c/c9/Daytime_img.png/revision/latest/scale-to-width-down/1000?cb=20241116044859"
     },
-     "BLAZING SUN": {
+    "BLAZING SUN": {
         "color": "0XFF8900",
         "thumbnail_url": "https://static.wikia.nocookie.net/supermarioglitchy4/images/b/b5/Angry_Sun_SMB3.png/revision/latest?cb=20230512215153",
         "Timer": "150"
@@ -85,33 +85,31 @@
     },
     "Blood Rain": {
         "color": "0X701f03",
-        "thumbnail_url": "https://cdn-icons-png.flaticon.com/512/967/967119.png",
-        "Timer": "150"
+        "thumbnail_url": "https://raw.githubusercontent.com/Jirach-1/J.JARAM/refs/heads/main/Icons/Blood%20Rain%20Biome.png",
+        "Timer": "600"
     },
     "Aurora": {
         "color": "0X3299a8",
-        "thumbnail_url": "https://images.stockcake.com/public/b/d/3/bd3769ca-18e5-4d66-9722-6f9dc8aa64de_medium/aurora-over-mountains-stockcake.jpg",
-        "Timer": "600"
+        "thumbnail_url": "https://raw.githubusercontent.com/Jirach-1/J.JARAM/refs/heads/main/Icons/Aurora%20Biome.png",
+        "Timer": "300"
     },
     "Eggland": {
         "color": "0Xf5f5dc",
-        "thumbnail_url": "https://cdn-icons-png.freepik.com/256/14400/14400227.png?semt=ais_white_label",
-        "Timer": "600"
+        "thumbnail_url": "https://raw.githubusercontent.com/Jirach-1/J.JARAM/refs/heads/main/Icons/Eggland%20Biome.png"
     },
     "Incinerator": {
-        "color": "0Xff6a00",
-        "thumbnail_url": "",
-        "Timer": null
+        "color": "0XFFB633",
+        "thumbnail_url": "https://raw.githubusercontent.com/Jirach-1/J.JARAM/refs/heads/main/Icons/Incinerator%20Biome.png",
+        "Timer": "200"
     },
-    "LOST FOREST": {
-        "color": "0x2E8B57",
-        "thumbnail_url": "",
-        "Timer": null
+    "Lost Forest": {
+        "color": "0X036327",
+        "thumbnail_url": "https://raw.githubusercontent.com/Jirach-1/J.JARAM/refs/heads/main/Icons/Lost%20Forest%20Biome.png",
+        "Timer": "300"
     },
-    "THE RADIANT FOREST": {
-        "color": "0xFFF1A8",
-        "thumbnail_url": "",
-        "Timer": null
+    "The Radiant Forest": {
+        "color": "0x7f2ae8",
+        "thumbnail_url": "https://raw.githubusercontent.com/Jirach-1/J.JARAM/refs/heads/main/Icons/Radiant%20Forest%20Biome.png",
+        "Timer": "1320"
     }
-
 }

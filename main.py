@@ -14,6 +14,8 @@ from launch_priority import (
     mark_launch_last_once,
     sort_user_items_by_launch_priority,
 )
+from merchant_fix import get_merchant_fix_controller
+from roblox_window_fixer import RobloxWindowGeometryFixer, WindowGeometry
 from cap_watchdog import (
     DEFAULT_CAP_WATCHDOG_SETTINGS,
     increment_cap_counter,
@@ -178,6 +180,13 @@ except ImportError:
                     "poll_interval": 10,
                 },
                 "cap_watchdog": dict(DEFAULT_CAP_WATCHDOG_SETTINGS),
+                "merchant_fix": {
+                    "smart_enabled": False,
+                    "smart_block_trigger": "boss_raid_ui",
+                    "post_marker_delay_seconds": 0.0,
+                    "smart_user_scope": "blacklist",
+                    "smart_user_ids": [],
+                },
             }
             self._ensure_directories()
 
@@ -356,7 +365,10 @@ class AuthenticationHandler:
                 cookie = normalize_roblosecurity_cookie_value(cookie)
             except Exception:
                 cookie = str(cookie or "").strip()
-        session = requests.Session()
+        with requests.Session() as session:
+            return self._obtain_auth_ticket_in_session(cookie, session)
+
+    def _obtain_auth_ticket_in_session(self, cookie, session):
         auth_meta = {"mark_bad": False, "failure_reason": "no_response"}
         session.headers.update(
             {
@@ -833,6 +845,8 @@ class GameLauncher:
     _global_launch_inflight_lock = threading.Lock()
     _global_launch_inflight = set()
     _global_launch_attempt_lock = threading.Lock()
+    _global_window_geometry_lock = threading.Lock()
+    _global_window_geometry_jobs = {}
 
     def __init__(self,
                  target_place,
@@ -914,142 +928,19 @@ class GameLauncher:
             self.log(f"[LAUNCH SKIP] {user_id} -> {server_label} {reason}")
 
 
-    def _related_window_search_pids(self, pid_or_pids):
-        targets = set()
-        try:
-            if isinstance(pid_or_pids, (set, tuple, list)):
-                for val in pid_or_pids:
-                    try:
-                        iv = int(val)
-                        if iv > 0:
-                            targets.add(iv)
-                    except Exception:
-                        continue
-            else:
-                iv = int(pid_or_pids)
-                if iv > 0:
-                    targets.add(iv)
-        except Exception:
-            pass
+    def _maybe_enforce_roblox_window_geometry(self, user_id: str, pid: int) -> None:
+        """Start a verified, launch-scoped geometry fixer in the background."""
+        uid = str(user_id)
+        # A new launch supersedes any watcher for the same account even when the
+        # feature was just disabled or its saved settings became invalid.
+        with GameLauncher._global_window_geometry_lock:
+            previous = GameLauncher._global_window_geometry_jobs.get(uid)
+            if previous is not None:
+                try:
+                    previous[1].set()
+                except Exception:
+                    pass
 
-        roots = list(targets)
-        for root_pid in roots:
-            try:
-                proc = psutil.Process(int(root_pid))
-            except Exception:
-                continue
-            try:
-                for child in proc.children(recursive=True):
-                    try:
-                        cpid = int(child.pid)
-                        if cpid > 0:
-                            targets.add(cpid)
-                    except Exception:
-                        continue
-            except Exception:
-                continue
-
-        return targets
-
-    def _find_visible_window_for_pid(self, pid_or_pids, *, include_hidden: bool = False, include_minimized: bool = False):
-        targets = self._related_window_search_pids(pid_or_pids)
-        if not targets:
-            return None
-
-        candidates = []
-
-        def window_callback(hwnd, _extra):
-            try:
-                visible = bool(win32gui.IsWindowVisible(hwnd))
-                iconic = bool(win32gui.IsIconic(hwnd))
-                if not include_hidden and not visible:
-                    return
-                if not include_minimized and iconic:
-                    return
-                _, hwnd_pid = win32process.GetWindowThreadProcessId(hwnd)
-                if int(hwnd_pid) not in targets:
-                    return
-                candidates.append((hwnd, visible, iconic))
-            except Exception:
-                pass
-
-        try:
-            win32gui.EnumWindows(window_callback, None)
-        except Exception:
-            pass
-
-        if not candidates:
-            return None
-
-        best_hwnd = None
-        best_key = None
-        for hwnd, visible, iconic in candidates:
-            try:
-                l, t, r, b = win32gui.GetWindowRect(hwnd)
-                w = max(0, int(r) - int(l))
-                h = max(0, int(b) - int(t))
-                area = int(w * h)
-                # Prefer visible, non-minimized windows with largest area.
-                key = (1 if visible else 0, 1 if not iconic else 0, area)
-                if best_key is None or key > best_key:
-                    best_key = key
-                    best_hwnd = hwnd
-            except Exception:
-                continue
-        return best_hwnd
-
-    def _wait_for_visible_window_for_pid(self, pid_or_pids, timeout_s: float = 8.0):
-        targets = self._related_window_search_pids(pid_or_pids)
-        deadline = time.time() + float(timeout_s or 0)
-        refresh_at = 0.0
-
-        while time.time() < deadline:
-            now = time.time()
-            if now >= refresh_at:
-                targets = self._related_window_search_pids(targets)
-                refresh_at = now + 0.5
-
-            hwnd = self._find_visible_window_for_pid(targets)
-            if hwnd:
-                return hwnd
-            time.sleep(0.15)
-
-        # Fallbacks for edge cases: minimized first, then hidden.
-        hwnd = self._find_visible_window_for_pid(targets, include_minimized=True)
-        if hwnd:
-            return hwnd
-        return self._find_visible_window_for_pid(targets, include_hidden=True, include_minimized=True)
-
-    def _window_matches_geometry(self, hwnd: int, x: int, y: int, w: int, h: int, tol: int = 2) -> bool:
-        try:
-            l, t, r, b = win32gui.GetWindowRect(int(hwnd))
-            cur_w = int(r - l)
-            cur_h = int(b - t)
-            return (
-                abs(int(l) - int(x)) <= int(tol)
-                and abs(int(t) - int(y)) <= int(tol)
-                and abs(int(cur_w) - int(w)) <= int(tol)
-                and abs(int(cur_h) - int(h)) <= int(tol)
-            )
-        except Exception:
-            return False
-
-    def _schedule_roblox_window_geometry_retry(self, user_id: str, pid: int) -> None:
-        """Retry a failed launch-time geometry update once after Roblox settles."""
-        try:
-            timer = threading.Timer(
-                5.0,
-                self._maybe_enforce_roblox_window_geometry,
-                args=(str(user_id), int(pid)),
-                kwargs={"is_retry": True},
-            )
-            timer.daemon = True
-            timer.start()
-            self.log(f"[WINPOS RETRY] uid={user_id} pid={pid} scheduled_in=5s")
-        except Exception:
-            pass
-
-    def _maybe_enforce_roblox_window_geometry(self, user_id: str, pid: int, *, is_retry: bool = False) -> None:
         try:
             if hasattr(self.cfg, "peek_settings"):
                 settings = self.cfg.peek_settings() or {}
@@ -1065,106 +956,84 @@ class GameLauncher:
             return
         if not bool(rwg.get("enforce_on_launch", False)):
             return
-
-        try:
-            x = int(rwg.get("x", 0) or 0)
-            y = int(rwg.get("y", 0) or 0)
-            w = int(rwg.get("w", 0) or 0)
-            h = int(rwg.get("h", 0) or 0)
-        except Exception:
-            return
-
-        if w <= 0 or h <= 0:
-            return
-
-        target_pids = self._related_window_search_pids(int(pid))
-        hwnd = self._wait_for_visible_window_for_pid(target_pids, timeout_s=10.0)
-        if not hwnd:
+        rz = settings.get("roblox_resizer", {}) or {}
+        if isinstance(rz, dict) and bool(rz.get("enabled", False)):
+            # Shrink Roblox windows (roblox_resizer) re-sizes every window every 3 s; a launch fixer
+            # aiming at the saved size would fight it for its whole 35 s guard. Shrink wins.
             try:
-                self.log(f"[WINPOS SKIP] uid={user_id} pid={pid} reason=no_window")
+                self.log(f"[WINPOS SKIP] uid={user_id} pid={pid} reason=shrink_windows_on")
             except Exception:
                 pass
             return
 
-        tol = 2
-        if self._window_matches_geometry(hwnd, x, y, w, h, tol=tol):
-            return
-
         try:
-            import win32con
-        except Exception as e:
+            geometry = WindowGeometry.from_settings(rwg)
+        except (TypeError, ValueError, OverflowError):
+            geometry = WindowGeometry(0, 0, 0, 0)
+        if not geometry.is_valid:
             try:
-                self.log(f"[WINPOS FAIL] uid={user_id} pid={pid} err={e!r}")
+                self.log(f"[WINPOS SKIP] uid={user_id} pid={pid} reason=invalid_geometry")
             except Exception:
                 pass
-            if not is_retry:
-                self._schedule_roblox_window_geometry_retry(user_id, pid)
             return
 
-        flags = int(win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE)
-        try:
-            flags |= int(getattr(win32con, "SWP_ASYNCWINDOWPOS", 0))
-        except Exception:
-            pass
-
-        last_err = None
-        applied = False
-        for attempt in range(1, 11):
-            try:
-                if not win32gui.IsWindow(int(hwnd)):
-                    hwnd = self._find_visible_window_for_pid(target_pids, include_minimized=True)
-                    if not hwnd:
-                        target_pids = self._related_window_search_pids(target_pids)
-                        hwnd = self._wait_for_visible_window_for_pid(target_pids, timeout_s=1.25)
-                    if not hwnd:
-                        break
-            except Exception:
-                hwnd = self._find_visible_window_for_pid(target_pids, include_minimized=True)
-                if not hwnd:
-                    break
-
-            try:
-                if win32gui.IsIconic(int(hwnd)) or win32gui.IsZoomed(int(hwnd)):
-                    win32gui.ShowWindow(int(hwnd), int(win32con.SW_RESTORE))
-                    time.sleep(0.06)
-            except Exception:
-                pass
-
-            try:
-                win32gui.SetWindowPos(int(hwnd), 0, int(x), int(y), int(w), int(h), flags)
-            except Exception as e:
-                last_err = e
+        cancel_event = threading.Event()
+        job_token = object()
+        with GameLauncher._global_window_geometry_lock:
+            previous = GameLauncher._global_window_geometry_jobs.get(uid)
+            if previous is not None:
                 try:
-                    # Fallback for some window-state/style transitions.
-                    win32gui.MoveWindow(int(hwnd), int(x), int(y), int(w), int(h), True)
-                except Exception as move_err:
-                    last_err = move_err
+                    previous[1].set()
+                except Exception:
+                    pass
+            GameLauncher._global_window_geometry_jobs[uid] = (job_token, cancel_event, int(pid))
 
-            time.sleep(0.10 if attempt < 3 else 0.20)
-            if self._window_matches_geometry(int(hwnd), x, y, w, h, tol=tol):
-                applied = True
-                break
-
-            target_pids = self._related_window_search_pids(target_pids)
-            hwnd = self._find_visible_window_for_pid(target_pids, include_minimized=True)
-
-        if applied:
+        def run_fixer() -> None:
             try:
-                self.log(f"[WINPOS] uid={user_id} pid={pid} -> x={x} y={y} w={w} h={h}")
-            except Exception:
-                pass
-            return
+                result = RobloxWindowGeometryFixer().fix(
+                    int(pid),
+                    geometry,
+                    cancel_event=cancel_event,
+                )
+                if result.success:
+                    self.log(
+                        f"[WINPOS] uid={uid} pid={pid} hwnd={result.hwnd} "
+                        f"attempts={result.attempts} -> x={geometry.x} y={geometry.y} "
+                        f"w={geometry.width} h={geometry.height}"
+                    )
+                elif result.reason != "cancelled":
+                    self.log(
+                        f"[WINPOS FAIL] uid={uid} pid={pid} reason={result.reason} "
+                        f"attempts={result.attempts} target=x={geometry.x} y={geometry.y} "
+                        f"w={geometry.width} h={geometry.height} actual={result.actual_rect}"
+                    )
+            except Exception as exc:
+                try:
+                    self.log(f"[WINPOS FAIL] uid={uid} pid={pid} err={exc!r}")
+                except Exception:
+                    pass
+            finally:
+                with GameLauncher._global_window_geometry_lock:
+                    current = GameLauncher._global_window_geometry_jobs.get(uid)
+                    if current is not None and current[0] is job_token:
+                        GameLauncher._global_window_geometry_jobs.pop(uid, None)
 
         try:
-            suffix = f" err={last_err!r}" if last_err is not None else ""
-            self.log(
-                f"[WINPOS FAIL] uid={user_id} pid={pid} "
-                f"target=x={x} y={y} w={w} h={h}{suffix}"
+            thread = threading.Thread(
+                target=run_fixer,
+                name=f"roblox-window-fixer-{uid}",
+                daemon=True,
             )
-        except Exception:
-            pass
-        if not is_retry:
-            self._schedule_roblox_window_geometry_retry(user_id, pid)
+            thread.start()
+        except Exception as exc:
+            with GameLauncher._global_window_geometry_lock:
+                current = GameLauncher._global_window_geometry_jobs.get(uid)
+                if current is not None and current[0] is job_token:
+                    GameLauncher._global_window_geometry_jobs.pop(uid, None)
+            try:
+                self.log(f"[WINPOS FAIL] uid={uid} pid={pid} reason=worker_start err={exc!r}")
+            except Exception:
+                pass
 
 
     def _convert_share_link(self, share_code, cookie):
@@ -1177,9 +1046,12 @@ class GameLauncher:
                 cookie = str(cookie or "")
         if not share_code or not cookie:
             return None, None, cookie
+        with requests.Session() as session:
+            return self._convert_share_link_in_session(share_code, cookie, session)
+
+    def _convert_share_link_in_session(self, share_code, cookie, s):
         url = "https://apis.roblox.com/sharelinks/v1/resolve-link"
         payload = {"linkId": share_code, "linkType": "Server"}
-        s = requests.Session()
         try:
             s.cookies.set(".ROBLOSECURITY", cookie, domain=".roblox.com", path="/")
         except Exception:
@@ -1249,7 +1121,8 @@ class GameLauncher:
         _add(prefer_cookie)
 
         try:
-            users = self.cfg.load_users() or {}
+            peek = getattr(self.cfg, "peek_users", None)
+            users = (peek() if callable(peek) else self.cfg.load_users()) or {}
         except Exception:
             users = {}
 
@@ -1586,6 +1459,8 @@ class GameLauncher:
                 return False
             self._launch_inflight.add(uid_key)
 
+        merchant_prelaunch_applied = False
+        merchant_controller = get_merchant_fix_controller()
         try:
             with GameLauncher._global_launch_attempt_lock:
                 if not skip_cleanup:
@@ -1593,6 +1468,7 @@ class GameLauncher:
                         if pid != self.process_manager.excluded_pid:
                             self.process_manager.terminate_process(pid, self.tracker)
 
+                merchant_prelaunch_applied = bool(merchant_controller.before_roblox_launch(user_id))
                 pid_launch_ts = time.time()
                 self.log(f"[LAUNCH] uid={user_id} label={server_label} calling os.startfile()")
                 os.startfile(game_url)
@@ -1606,6 +1482,19 @@ class GameLauncher:
                         pass
 
                 new_pid = self.process_manager.await_new_process(user_id, pid_launch_ts, self.process_timeout, self.tracker)
+                if new_pid and merchant_prelaunch_applied:
+                    try:
+                        process_created_at = float(psutil.Process(int(new_pid)).create_time())
+                        merchant_controller.on_roblox_process_created(
+                            int(new_pid), user_id, process_created_at
+                        )
+                        merchant_prelaunch_applied = False
+                    except Exception:
+                        try:
+                            self.process_manager.terminate_process(int(new_pid), self.tracker)
+                        except Exception:
+                            pass
+                        raise
             if new_pid:
                 # clear bad flag if we just launched fine
                 if user_info and user_info.get("bad", False):
@@ -1661,6 +1550,8 @@ class GameLauncher:
                 pass
             return False
         finally:
+            if merchant_prelaunch_applied:
+                merchant_controller.cancel_prelaunch(user_id, "launch did not produce a usable Roblox process")
             with self._launch_inflight_lock:
                 self._launch_inflight.discard(uid_key)
             with GameLauncher._global_launch_inflight_lock:
@@ -1708,7 +1599,8 @@ class GameLauncher:
               is considered the owner.
         """
         try:
-            users = self.cfg.load_users() or {}
+            peek = getattr(self.cfg, "peek_users", None)
+            users = (peek() if callable(peek) else self.cfg.load_users()) or {}
         except Exception:
             users = {}
 

@@ -895,7 +895,7 @@ except Exception:  # pragma: no cover
 
 
 try:
-    from auto_action_alerts import (
+    from dev_only.auto_action_alerts import (
         AutoActionAlertRequest as _AutoActionAlertRequest,
         AutoActionAlertService as _AutoActionAlertService,
         MAX_PENDING_PRE_SEQUENCE_ALERTS as _MAX_PENDING_PRE_SEQUENCE_ALERTS,
@@ -929,6 +929,7 @@ except Exception:  # pragma: no cover - Auto-Actions must run without alerts.
             embed_title: str = "",
             embed_description: str = "",
             screenshot: Optional[bytes] = None,
+            fields: Sequence[Tuple[str, str]] = (),
         ) -> bool:
             # Webhook steps (e.g. the SC/BR "used" alert) post even without the alerts module.
             # ponytail: one daemon thread per post; a queue if posts ever pile up.
@@ -945,8 +946,16 @@ except Exception:  # pragma: no cover - Auto-Actions must run without alerts.
                     embed["title"] = str(embed_title)[:256]
                 if embed_description:
                     embed["description"] = str(embed_description)[:4096]
+                if fields:
+                    embed["fields"] = [{"name": n, "value": str(v)[:1024], "inline": True} for n, v in fields if v]
                 if screenshot:
                     embed["image"] = {"url": "attachment://screenshot.jpg"}
+                try:
+                    from version import APP_FOOTER
+
+                    embed["footer"] = {"text": APP_FOOTER}
+                except Exception:
+                    pass
                 payload["embeds"] = [embed]
 
             def _post() -> None:
@@ -995,6 +1004,13 @@ class RelRect:
 
 
 @dataclass(frozen=True)
+class ColorConditionCheck:
+    point: RelPoint
+    color_hex: str = "#FFFFFF"
+    tolerance: int = 0
+
+
+@dataclass(frozen=True)
 class ActionCondition:
     enabled: bool = False
     kind: str = "color"
@@ -1007,6 +1023,7 @@ class ActionCondition:
     case_sensitive: bool = False
     filter_ids: Tuple[str, ...] = ()
     color_filters: Tuple[Tuple[int, int, int, int], ...] = ()
+    color_checks: Tuple[ColorConditionCheck, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1185,6 +1202,42 @@ def _normalize_rel_rect(raw: Any) -> Optional[RelRect]:
     return rect
 
 
+def _normalize_condition_color_checks(
+    raw: Any,
+    *,
+    default_tolerance: int = 0,
+) -> Tuple[ColorConditionCheck, ...]:
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    out: List[ColorConditionCheck] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        point = _normalize_rel_point(item.get("point") or item.get("condition_point"))
+        if point is None and "x" in item and "y" in item:
+            point = _normalize_rel_point(item)
+        if point is None:
+            continue
+        try:
+            tolerance = max(
+                0,
+                min(
+                    255,
+                    int(item.get("tolerance", item.get("tol", default_tolerance)) or 0),
+                ),
+            )
+        except Exception:
+            tolerance = 0
+        out.append(
+            ColorConditionCheck(
+                point=point,
+                color_hex=str(item.get("color") or item.get("color_hex") or "#FFFFFF").strip() or "#FFFFFF",
+                tolerance=tolerance,
+            )
+        )
+    return tuple(out)
+
+
 def _normalize_condition(
     raw: Any,
     *,
@@ -1215,6 +1268,20 @@ def _normalize_condition(
     if point is None:
         point = legacy_point
 
+    color_hex = str(base.get("color") or base.get("color_hex") or legacy_color or "#FFFFFF").strip() or "#FFFFFF"
+    color_check_keys = ("color_checks", "color_pairs", "point_color_pairs")
+    explicit_color_checks = next((base.get(key) for key in color_check_keys if key in base), None)
+    has_explicit_color_checks = any(key in base for key in color_check_keys)
+    color_checks = (
+        _normalize_condition_color_checks(explicit_color_checks, default_tolerance=tolerance)
+        if has_explicit_color_checks
+        else ()
+    )
+    if not has_explicit_color_checks and point is not None:
+        color_checks = (
+            ColorConditionCheck(point=point, color_hex=color_hex, tolerance=tolerance),
+        )
+
     roi = _normalize_rel_rect(base.get("roi") or base.get("area") or base.get("ocr_roi"))
 
     match_mode = str(base.get("match_mode") or base.get("ocr_match_mode") or "contains").strip().lower()
@@ -1226,8 +1293,9 @@ def _normalize_condition(
         kind=kind,
         point=point,
         roi=roi,
-        color_hex=str(base.get("color") or base.get("color_hex") or legacy_color or "#FFFFFF").strip() or "#FFFFFF",
+        color_hex=color_hex,
         tolerance=tolerance,
+        color_checks=color_checks,
         target_text=str(base.get("target_text") or base.get("ocr_text") or base.get("text") or "").strip(),
         match_mode=match_mode,
         case_sensitive=bool(base.get("case_sensitive", False)),
@@ -1265,6 +1333,13 @@ def _normalize_action_step(raw: Any, *, fallback_name: str = "") -> Optional[Act
     ):
         kind = "action_row"
     elif kind in (
+        "disable",
+        "disable_user",
+        "disable_account",
+        "disable_user_account",
+    ):
+        kind = "disable_user"
+    elif kind in (
         "kill",
         "kill_user",
         "kill_user_processes",
@@ -1285,6 +1360,7 @@ def _normalize_action_step(raw: Any, *, fallback_name: str = "") -> Optional[Act
         "wait",
         "webhook",
         "action_row",
+        "disable_user",
         "kill_user",
         "if",
         "else",
@@ -1375,6 +1451,8 @@ def _normalize_action_step(raw: Any, *, fallback_name: str = "") -> Optional[Act
             "condition_type",
             "condition_point",
             "conditional_point",
+            "condition_color_checks",
+            "color_checks",
             "ocr_text",
             "target_text",
             "ocr_roi",
@@ -1391,6 +1469,8 @@ def _normalize_action_step(raw: Any, *, fallback_name: str = "") -> Optional[Act
                 "match_mode": raw.get("match_mode", raw.get("ocr_match_mode", "contains")),
                 "case_sensitive": raw.get("case_sensitive", False),
             }
+            if "condition_color_checks" in raw or "color_checks" in raw:
+                condition_raw["color_checks"] = raw.get("condition_color_checks", raw.get("color_checks"))
         condition = _normalize_condition(condition_raw, default_enabled=(kind == "if"))
 
     return ActionStep(
@@ -1472,9 +1552,14 @@ def _normalize_behavior(raw: Any, legacy: Optional[Dict[str, Any]] = None) -> Di
     if raw_trigger_type in ("normal", "none"):
         trigger_type = "normal"
     elif raw_trigger_type == "ocr_filter":
-        trigger_type = "ocr_filter" if filter_ids else "normal"
+        # Keep explicitly event-driven rows event-driven even when their
+        # bindings are missing. Falling back to "normal" makes an incomplete
+        # or cross-machine configuration run on its own.
+        trigger_type = "ocr_filter"
     elif raw_trigger_type == "merchant":
-        trigger_type = "merchant" if merchants else "normal"
+        trigger_type = "merchant"
+    elif raw_trigger_type in ("biome", "biome_change", "biome_changed"):
+        trigger_type = "biome"
     elif raw_trigger_type in ("action_row", "action_sequence", "action_step"):
         trigger_type = "action_row"
     else:
@@ -1568,6 +1653,53 @@ _AUTOIT_KEY_ALIASES = {
     "ctrl": "{CTRL}",
     "control": "{CTRL}",
     "alt": "{ALT}",
+    "caps lock": "{CAPSLOCK}",
+    "capslock": "{CAPSLOCK}",
+    "num lock": "{NUMLOCK}",
+    "numlock": "{NUMLOCK}",
+    "scroll lock": "{SCROLLLOCK}",
+    "scrolllock": "{SCROLLLOCK}",
+    "print screen": "{PRINTSCREEN}",
+    "printscreen": "{PRINTSCREEN}",
+    "pause": "{PAUSE}",
+    "break": "{BREAK}",
+    "menu": "{APPSKEY}",
+    "apps key": "{APPSKEY}",
+    "left windows": "{LWIN}",
+    "right windows": "{RWIN}",
+    "left shift": "{LSHIFT}",
+    "right shift": "{RSHIFT}",
+    "left ctrl": "{LCTRL}",
+    "right ctrl": "{RCTRL}",
+    "left alt": "{LALT}",
+    "right alt": "{RALT}",
+    "numpad 0": "{NUMPAD0}",
+    "numpad 1": "{NUMPAD1}",
+    "numpad 2": "{NUMPAD2}",
+    "numpad 3": "{NUMPAD3}",
+    "numpad 4": "{NUMPAD4}",
+    "numpad 5": "{NUMPAD5}",
+    "numpad 6": "{NUMPAD6}",
+    "numpad 7": "{NUMPAD7}",
+    "numpad 8": "{NUMPAD8}",
+    "numpad 9": "{NUMPAD9}",
+    "numpad multiply": "{NUMPADMULT}",
+    "numpad add": "{NUMPADADD}",
+    "numpad subtract": "{NUMPADSUB}",
+    "numpad divide": "{NUMPADDIV}",
+    "numpad period": "{NUMPADDOT}",
+    "numpad enter": "{NUMPADENTER}",
+    "backtick (`)": "`",
+    "minus (-)": "-",
+    "equals (=)": "=",
+    "left bracket ([)": "[",
+    "right bracket (])": "]",
+    "backslash (\\)": "\\",
+    "semicolon (;)": ";",
+    "apostrophe (')": "'",
+    "comma (,)": ",",
+    "period (.)": ".",
+    "slash (/)": "/",
 }
 
 
@@ -1787,6 +1919,14 @@ def _condition_payload(condition: ActionCondition) -> Dict[str, Any]:
         "type": str(condition.kind or "color"),
         "color": str(condition.color_hex or "#FFFFFF"),
         "tolerance": int(condition.tolerance or 0),
+        "color_checks": [
+            {
+                "point": {"x": float(check.point.x), "y": float(check.point.y)},
+                "color": str(check.color_hex or "#FFFFFF"),
+                "tolerance": int(check.tolerance or 0),
+            }
+            for check in (condition.color_checks or ())
+        ],
         "target_text": str(condition.target_text or ""),
         "match_mode": str(condition.match_mode or "contains"),
         "case_sensitive": bool(condition.case_sensitive),
@@ -1903,6 +2043,7 @@ class AutoActionEngine:
         post_action_hook: Optional[Callable[[str, int], None]] = None,
         ocr_text_provider: Optional[Callable[[int, Dict[str, Any]], str]] = None,
         kill_user_callback: Optional[Callable[[str], bool]] = None,
+        disable_user_callback: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self._pid_provider = pid_provider
         self._hwnd_provider = hwnd_provider
@@ -1924,6 +2065,7 @@ class AutoActionEngine:
         self._post_action_hook = post_action_hook
         self._ocr_text_provider = ocr_text_provider
         self._kill_user_callback = kill_user_callback
+        self._disable_user_callback = disable_user_callback
         self._alert_service = _AutoActionAlertService()
         self._alert_service.log = log  # the fallback service reports failed posts here
 
@@ -1953,6 +2095,13 @@ class AutoActionEngine:
         self._active_action: Optional[Tuple[str, int]] = None
         self._active_action_row_id: str = ""
         self._active_action_chain: Tuple[str, ...] = ()
+        self._sequence_cancel_generation: Dict[str, int] = {}
+        self._kill_blocked_pid: Dict[str, int] = {}
+        # Runtime-only reservations used by companion managers such as ONE.
+        # This deliberately does not become part of the user's saved Auto
+        # Actions document.
+        self._excluded_user_ids: frozenset[str] = frozenset()
+        self._last_biomes: Dict[str, str] = {}
 
     def is_running(self) -> bool:
         thread = self._thread
@@ -1976,6 +2125,26 @@ class AutoActionEngine:
         with self._cfg_lock:
             self._cfg = copy.deepcopy(cfg or {})
 
+    def set_excluded_user_ids(self, user_ids: Iterable[str]) -> None:
+        """Temporarily reserve users for another manager without saving config.
+
+        JARAM keeps ownership of its persisted Auto Actions settings.  A
+        companion manager can call this while it owns an account and clear it
+        when it stops.  The check is applied both to the normal worker loop
+        and to direct/test rule playback.
+        """
+        cleaned = {
+            str(raw_uid).strip()
+            for raw_uid in (user_ids or ())
+            if str(raw_uid).strip()
+        }
+        with self._state_lock:
+            self._excluded_user_ids = frozenset(cleaned)
+
+    def _is_user_excluded(self, uid: str) -> bool:
+        with self._state_lock:
+            return str(uid or "").strip() in self._excluded_user_ids
+
     def reset_manager_startup_counts(self) -> None:
         """Allow startup-limited rows to run again for a new manager session."""
         with self._state_lock:
@@ -1986,6 +2155,13 @@ class AutoActionEngine:
         cfg = self._cfg_snapshot()
         now = time.time()
         users = self._users_from_cfg(cfg)
+        # Parsing actions is comparatively expensive. Parse each configured row
+        # once, then apply its user filter below instead of rebuilding every
+        # ActionRule for every account in the monitor.
+        all_rules = self._rules_from_cfg(cfg)
+        raw_items = cfg.get("items") or []
+        if not isinstance(raw_items, list):
+            raw_items = []
 
         with self._state_lock:
             next_ready = copy.deepcopy(self._next_ready)
@@ -1998,9 +2174,19 @@ class AutoActionEngine:
             merchant_events = copy.deepcopy(self._merchant_events)
             not_in_menu_since = dict(self._not_in_menu_since)
             active_action = self._active_action
+            last_biomes = dict(self._last_biomes)
 
         rows: List[Dict[str, Any]] = []
         for uid in users:
+            applicable_rules = []
+            for idx, rule in all_rules:
+                raw_item = raw_items[idx] if 0 <= int(idx) < len(raw_items) else {}
+                if self._item_applies_to_uid(raw_item, uid):
+                    applicable_rules.append((idx, rule))
+            if not applicable_rules:
+                continue
+
+            username = self._username(uid)
             try:
                 pid = int(self._pid_provider(uid) or 0)
             except Exception:
@@ -2014,7 +2200,7 @@ class AutoActionEngine:
             except Exception:
                 in_menu = None
 
-            for idx, rule in self._rules_from_cfg(cfg, uid=uid):
+            for idx, rule in applicable_rules:
                 idx_i = int(idx)
                 ready_at = float((next_ready.get(uid) or {}).get(idx_i, 0.0) or 0.0)
                 use_at = float((pending_use.get(uid) or {}).get(idx_i, 0.0) or 0.0)
@@ -2037,20 +2223,39 @@ class AutoActionEngine:
                     user_events = trigger_events.get(uid) or {}
                     for filter_id in rule.trigger_filter_ids:
                         event = user_events.get(str(filter_id))
-                        if event and (
-                            latest_trigger is None
-                            or int(event.get("seq", 0) or 0) > int(latest_trigger.get("seq", 0) or 0)
+                        if (
+                            event
+                            and int(event.get("pid", 0) or 0) == int(pid or 0)
+                            and hash(rule) in {
+                                int(value) for value in (event.get("rule_signatures") or ())
+                            }
+                            and (
+                                latest_trigger is None
+                                or int(event.get("seq", 0) or 0)
+                                > int(latest_trigger.get("seq", 0) or 0)
+                            )
                         ):
                             latest_trigger = event
                 elif rule.trigger_type == "merchant":
                     user_events = merchant_events.get(uid) or {}
                     for merchant in rule.trigger_merchants:
                         event = user_events.get(str(merchant))
-                        if event and (
-                            latest_trigger is None
-                            or int(event.get("seq", 0) or 0) > int(latest_trigger.get("seq", 0) or 0)
+                        if (
+                            event
+                            and int(event.get("pid", 0) or 0) == int(pid or 0)
+                            and hash(rule) in {
+                                int(value) for value in (event.get("rule_signatures") or ())
+                            }
+                            and (
+                                latest_trigger is None
+                                or int(event.get("seq", 0) or 0)
+                                > int(latest_trigger.get("seq", 0) or 0)
+                            )
                         ):
                             latest_trigger = event
+                elif rule.trigger_type == "biome":
+                    if biome and biome.upper() != str(last_biomes.get(uid) or "").upper():
+                        latest_trigger = {"seq": 1, "ts": now}
                 latest_trigger_seq = int((latest_trigger or {}).get("seq", 0) or 0)
                 consumed_seq = int((consumed.get(uid) or {}).get(idx_i, 0) or 0)
 
@@ -2104,20 +2309,29 @@ class AutoActionEngine:
                 elif rule.repeat_mode in ("count", "once_per_pid") and is_completed:
                     status = "complete"
                     status_detail = "Startup play count complete" if rule.repeat_mode == "count" else "Complete for PID"
-                elif rule.trigger_type == "ocr_filter" and rule.trigger_filter_ids:
-                    if latest_trigger_seq > consumed_seq:
+                elif rule.trigger_type == "ocr_filter":
+                    if not rule.trigger_filter_ids:
+                        status = "blocked"
+                        status_detail = "No OCR filters bound"
+                    elif latest_trigger_seq > consumed_seq:
                         status = "triggered"
                         status_detail = "OCR triggered"
                     else:
                         status = "waiting"
                         status_detail = "Waiting for OCR"
-                elif rule.trigger_type == "merchant" and rule.trigger_merchants:
-                    if latest_trigger_seq > consumed_seq:
+                elif rule.trigger_type == "merchant":
+                    if not rule.trigger_merchants:
+                        status = "blocked"
+                        status_detail = "No merchants bound"
+                    elif latest_trigger_seq > consumed_seq:
                         status = "triggered"
                         status_detail = "Merchant triggered"
                     else:
                         status = "waiting"
                         status_detail = "Waiting for merchant"
+                elif rule.trigger_type == "biome":
+                    status = "triggered" if latest_trigger is not None else "waiting"
+                    status_detail = "Biome changed" if latest_trigger is not None else "Waiting for biome change"
                 elif rule.trigger_type == "action_row":
                     status = "waiting"
                     status_detail = "Waiting for action row call"
@@ -2125,7 +2339,7 @@ class AutoActionEngine:
                 rows.append(
                     {
                         "uid": uid,
-                        "username": self._username(uid),
+                        "username": username,
                         "action_index": idx_i,
                         "action_row_id": str(rule.row_id),
                         "action_name": str(rule.name),
@@ -2161,18 +2375,49 @@ class AutoActionEngine:
             "rows": rows,
         }
 
+    def _event_rule_signatures(self, uid: str, trigger_type: str, trigger_key: str) -> Tuple[int, ...]:
+        """Return enabled rule signatures that can accept this event right now."""
+        uid_s = str(uid or "").strip()
+        key_s = str(trigger_key or "").strip()
+        if not uid_s or not key_s:
+            return ()
+
+        cfg = self._cfg_snapshot()
+        if not bool(cfg.get("enabled", False)) or uid_s not in self._users_from_cfg(cfg):
+            return ()
+
+        signatures: List[int] = []
+        for _idx, rule in self._rules_from_cfg(cfg, uid=uid_s):
+            if not rule.enabled or not rule.actions or rule.trigger_type != str(trigger_type):
+                continue
+            if rule.trigger_type == "ocr_filter":
+                accepts = key_s in rule.trigger_filter_ids
+            elif rule.trigger_type == "merchant":
+                accepts = key_s in rule.trigger_merchants
+            else:
+                accepts = False
+            if accepts:
+                signatures.append(hash(rule))
+        return tuple(signatures)
+
     def record_ocr_filter_trigger(self, uid: str, pid: int, filter_id: str, filter_name: str = "") -> None:
         uid_s = str(uid or "").strip()
         filter_id_s = str(filter_id or "").strip()
         if not uid_s or not filter_id_s:
             return
+        rule_signatures = self._event_rule_signatures(uid_s, "ocr_filter", filter_id_s)
+        if not rule_signatures:
+            return
         with self._state_lock:
+            if int(self._kill_blocked_pid.get(uid_s, 0) or 0) == int(pid or 0):
+                return
             self._trigger_seq += 1
             self._trigger_events.setdefault(uid_s, {})[filter_id_s] = {
                 "seq": int(self._trigger_seq),
                 "ts": float(time.time()),
                 "pid": int(pid or 0),
                 "name": str(filter_name or filter_id_s),
+                "rule_signatures": rule_signatures,
             }
 
     def record_merchant_trigger(self, uid: str, pid: int, merchant: str) -> None:
@@ -2181,13 +2426,19 @@ class AutoActionEngine:
         if not uid_s or not merchants:
             return
         merchant_s = merchants[0]
+        rule_signatures = self._event_rule_signatures(uid_s, "merchant", merchant_s)
+        if not rule_signatures:
+            return
         with self._state_lock:
+            if int(self._kill_blocked_pid.get(uid_s, 0) or 0) == int(pid or 0):
+                return
             self._trigger_seq += 1
             self._merchant_events.setdefault(uid_s, {})[merchant_s] = {
                 "seq": int(self._trigger_seq),
                 "ts": float(time.time()),
                 "pid": int(pid or 0),
                 "name": merchant_s,
+                "rule_signatures": rule_signatures,
             }
 
     def _play_action_row_now(
@@ -2346,6 +2597,11 @@ class AutoActionEngine:
         with self._cfg_lock:
             return copy.deepcopy(self._cfg or {})
 
+    def _enabled_snapshot(self) -> bool:
+        """Read the stop switch without copying the complete action document."""
+        with self._cfg_lock:
+            return bool((self._cfg or {}).get("enabled", False))
+
     def _users_from_cfg(self, cfg: Dict[str, Any]) -> List[str]:
         selected: List[str] = []
         selected_set: set[str] = set()
@@ -2356,7 +2612,7 @@ class AutoActionEngine:
                 selected_set.add(uid)
 
         if _normalize_user_filter_mode(cfg.get("user_filter_mode", "whitelist")) != "blacklist":
-            return selected
+            return [uid for uid in selected if not self._is_user_excluded(uid)]
 
         provider = self._user_ids_provider
         if provider is None:
@@ -2374,7 +2630,7 @@ class AutoActionEngine:
                 continue
             seen.add(uid)
             resolved.append(uid)
-        return resolved
+        return [uid for uid in resolved if not self._is_user_excluded(uid)]
 
     def _username(self, uid: str) -> str:
         fn = self._username_provider
@@ -2412,6 +2668,68 @@ class AutoActionEngine:
         except Exception:
             return ""
 
+    @staticmethod
+    def _item_applies_to_uid(raw: object, uid: str) -> bool:
+        if not isinstance(raw, dict):
+            return False
+        uid_s = str(uid).strip()
+        selected_users = _normalize_user_id_list(raw.get("users", None))
+        if not isinstance(selected_users, list):
+            return True
+
+        user_filter_mode = _normalize_user_filter_mode(raw.get("user_filter_mode", "whitelist"))
+        if user_filter_mode == "blacklist":
+            return not selected_users or uid_s not in selected_users
+        if selected_users:
+            return uid_s in selected_users
+        return not bool(raw.get("users_explicit", False))
+
+    @staticmethod
+    def _compile_item_user_filters(cfg: Dict[str, Any]) -> Dict[int, Tuple[Optional[frozenset[str]], str, bool]]:
+        compiled: Dict[int, Tuple[Optional[frozenset[str]], str, bool]] = {}
+        raw_items = cfg.get("items") or []
+        if not isinstance(raw_items, list):
+            return compiled
+        for idx, raw in enumerate(raw_items):
+            if not isinstance(raw, dict):
+                continue
+            selected = _normalize_user_id_list(raw.get("users", None))
+            compiled[idx] = (
+                None if selected is None else frozenset(str(uid) for uid in selected),
+                _normalize_user_filter_mode(raw.get("user_filter_mode", "whitelist")),
+                bool(raw.get("users_explicit", False)),
+            )
+        return compiled
+
+    @staticmethod
+    def _compiled_item_applies_to_uid(
+        spec: Optional[Tuple[Optional[frozenset[str]], str, bool]],
+        uid: str,
+    ) -> bool:
+        if spec is None:
+            return False
+        selected, mode, users_explicit = spec
+        if selected is None:
+            return True
+        uid_s = str(uid).strip()
+        if mode == "blacklist":
+            return not selected or uid_s not in selected
+        if selected:
+            return uid_s in selected
+        return not users_explicit
+
+    def _parsed_rules_for_uid(
+        self,
+        rules: Sequence[Tuple[int, ActionRule]],
+        user_filters: Dict[int, Tuple[Optional[frozenset[str]], str, bool]],
+        uid: str,
+    ) -> List[Tuple[int, ActionRule]]:
+        return [
+            (idx, rule)
+            for idx, rule in rules
+            if self._compiled_item_applies_to_uid(user_filters.get(int(idx)), uid)
+        ]
+
     def _rules_from_cfg(self, cfg: Dict[str, Any], *, uid: Optional[str] = None) -> List[Tuple[int, ActionRule]]:
         out: List[Tuple[int, ActionRule]] = []
         raw_items = cfg.get("items") or []
@@ -2420,25 +2738,15 @@ class AutoActionEngine:
 
         uid_s = str(uid).strip() if uid is not None else None
 
+        if uid_s is not None and self._is_user_excluded(uid_s):
+            return out
+
         for idx, raw in enumerate(raw_items):
             if not isinstance(raw, dict):
                 continue
 
-            if uid_s is not None:
-                raw_users = raw.get("users", None)
-                users_explicit = bool(raw.get("users_explicit", False))
-                selected_users = _normalize_user_id_list(raw_users)
-                user_filter_mode = _normalize_user_filter_mode(raw.get("user_filter_mode", "whitelist"))
-                if isinstance(selected_users, list):
-                    if user_filter_mode == "blacklist":
-                        if selected_users and uid_s in selected_users:
-                            continue
-                    else:
-                        if selected_users:
-                            if uid_s not in selected_users:
-                                continue
-                        elif users_explicit:
-                            continue
+            if uid_s is not None and not self._item_applies_to_uid(raw, uid_s):
+                continue
 
             actions_raw = raw.get("actions") or []
             if not isinstance(actions_raw, list):
@@ -2634,7 +2942,14 @@ class AutoActionEngine:
             + (f" biome={biome}" if biome else "")
         )
 
-    def _latest_trigger_event(self, uid: str, rule: ActionRule) -> Optional[Dict[str, Any]]:
+    def _latest_trigger_event(
+        self,
+        uid: str,
+        rule: ActionRule,
+        *,
+        current_pid: Optional[int] = None,
+        required_rule_signature: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
         if rule.trigger_type == "ocr_filter" and rule.trigger_filter_ids:
             keys = rule.trigger_filter_ids
             events = self._trigger_events.get(str(uid), {})
@@ -2648,6 +2963,21 @@ class AutoActionEngine:
             event = events.get(str(key))
             if not event:
                 continue
+            if current_pid is not None:
+                try:
+                    if int(event.get("pid", 0) or 0) != int(current_pid or 0):
+                        continue
+                except Exception:
+                    continue
+            if required_rule_signature is not None:
+                try:
+                    event_signatures = {
+                        int(value) for value in (event.get("rule_signatures") or ())
+                    }
+                except Exception:
+                    continue
+                if int(required_rule_signature) not in event_signatures:
+                    continue
             if latest is None or int(event.get("seq", 0) or 0) > int(latest.get("seq", 0) or 0):
                 latest = event
         return latest
@@ -2769,7 +3099,10 @@ class AutoActionEngine:
                 if str(rule.repeat_mode) == "count":
                     completed_startup_rows.add(int(idx))
                 elif str(rule.repeat_mode) == "once_per_pid":
-                    completed_pids.setdefault(int(idx), set()).add(int(pid or 0))
+                    # A user's previous process cannot run this row again.
+                    # Retaining every PID also misidentifies reused Windows
+                    # PIDs as sessions that have already completed the row.
+                    completed_pids[int(idx)] = {int(pid or 0)}
 
     def _condition_matches(self, hwnd: int, condition: ActionCondition, *, click_delay: float) -> bool:
         if not bool(condition.enabled):
@@ -2795,29 +3128,41 @@ class AutoActionEngine:
                 return False
             return _ocr_text_matches(text, condition)
 
-        if condition.point is None:
-            time.sleep(max(0.01, float(click_delay)))
-            return False
-
-        abs_xy = _abs_from_rel(hwnd, condition.point)
-        if not abs_xy:
-            time.sleep(max(0.01, float(click_delay)))
-            return False
-
-        expected = _hex_to_rgb(condition.color_hex)
-        tolerance = int(condition.tolerance or 0)
-        sampled = [
-            px
-            for px in (
-                _window_rel_pixel_rgb(hwnd, condition.point),
-                _screen_pixel_rgb(*abs_xy),
+        color_checks = tuple(condition.color_checks or ())
+        if not color_checks and condition.point is not None:
+            color_checks = (
+                ColorConditionCheck(
+                    point=condition.point,
+                    color_hex=condition.color_hex,
+                    tolerance=condition.tolerance,
+                ),
             )
-            if px is not None
-        ]
-        if not sampled:
+        if not color_checks:
             time.sleep(max(0.01, float(click_delay)))
             return False
-        return any(_color_close(px, expected, tolerance) for px in sampled)
+
+        for check in color_checks:
+            abs_xy = _abs_from_rel(hwnd, check.point)
+            if not abs_xy:
+                time.sleep(max(0.01, float(click_delay)))
+                return False
+
+            expected = _hex_to_rgb(check.color_hex)
+            tolerance = int(check.tolerance or 0)
+            sampled = [
+                px
+                for px in (
+                    _window_rel_pixel_rgb(hwnd, check.point),
+                    _screen_pixel_rgb(*abs_xy),
+                )
+                if px is not None
+            ]
+            if not sampled:
+                time.sleep(max(0.01, float(click_delay)))
+                return False
+            if not any(_color_close(px, expected, tolerance) for px in sampled):
+                return False
+        return True
 
     @staticmethod
     def _find_if_bounds(actions: Sequence[ActionStep], start_idx: int, end_idx: Optional[int] = None) -> Tuple[Optional[int], int]:
@@ -2909,6 +3254,8 @@ class AutoActionEngine:
             template = "Auto-Actions webhook step reached for {username}."
         replacements = self._webhook_replacements_for_step(step, uid, rule_name)
         message = self._render_webhook_template(template, replacements, limit=2000)
+        if bool(step.webhook_embed_enabled):
+            return message  # the embed carries the text; the message may be just a ping, or empty
         return message or "Auto-Actions webhook step reached."
 
     def _webhook_embed_for_step(self, step: ActionStep, uid: str, rule_name: str) -> Tuple[str, str]:
@@ -2957,6 +3304,12 @@ class AutoActionEngine:
         message = self._webhook_message_for_step(step, uid, rule_name)
         embed_title, embed_description = self._webhook_embed_for_step(step, uid, rule_name)
         screenshot = self._webhook_screenshot_for_step(step, hwnd)
+        fields: List[Tuple[str, str]] = []
+        if embed_title or embed_description:
+            rep = self._webhook_replacements_for_step(step, uid, rule_name)
+            ps = rep.get("ps_link") or ""
+            fields = [("Account", rep.get("username") or ""), ("Biome", rep.get("biome") or ""),
+                      ("Server", f"[Join]({ps})" if ps.startswith("http") else rep.get("server") or "")]
         if bool(step.webhook_include_screenshot) and screenshot is None:
             try:
                 self._log(
@@ -2975,6 +3328,7 @@ class AutoActionEngine:
                         embed_title=embed_title,
                         embed_description=embed_description,
                         screenshot=screenshot,
+                        fields=fields,
                     )
                 ) or sent
             except Exception:
@@ -2990,7 +3344,42 @@ class AutoActionEngine:
             except Exception:
                 pass
 
-    def _kill_user_step(self, step: ActionStep, uid: str) -> None:
+    def _sequence_cancel_token(self, uid: str) -> int:
+        with self._state_lock:
+            return int(self._sequence_cancel_generation.get(str(uid), 0) or 0)
+
+    def _pid_blocked_by_kill(self, uid: str, pid: Optional[int]) -> bool:
+        uid_s = str(uid or "").strip()
+        try:
+            pid_i = int(pid or 0)
+        except Exception:
+            pid_i = 0
+        with self._state_lock:
+            blocked_pid = int(self._kill_blocked_pid.get(uid_s, 0) or 0)
+            if blocked_pid <= 0:
+                return False
+            if pid_i == blocked_pid:
+                return True
+            self._kill_blocked_pid.pop(uid_s, None)
+            return False
+
+    def _cancel_queued_sequences_for_user(self, uid: str) -> None:
+        """Drop work already queued for a user and invalidate the active batch."""
+        uid_s = str(uid or "").strip()
+        if not uid_s:
+            return
+
+        with self._state_lock:
+            self._pending_use_at.pop(uid_s, None)
+            self._pending_alert_send_at.pop(uid_s, None)
+            self._pending_trigger_seq.pop(uid_s, None)
+            self._trigger_events.pop(uid_s, None)
+            self._merchant_events.pop(uid_s, None)
+            self._sequence_cancel_generation[uid_s] = (
+                int(self._sequence_cancel_generation.get(uid_s, 0) or 0) + 1
+            )
+
+    def _kill_user_step(self, step: ActionStep, uid: str, pid: Optional[int] = None) -> None:
         uid_s = str(uid or "").strip()
         if not uid_s:
             try:
@@ -2998,6 +3387,10 @@ class AutoActionEngine:
             except Exception:
                 pass
             return
+
+        # Process termination is delivered asynchronously by the GUI worker. Clear
+        # queued work first so another row cannot start during that handoff.
+        self._cancel_queued_sequences_for_user(uid_s)
 
         callback = self._kill_user_callback
         if callback is None:
@@ -3016,11 +3409,75 @@ class AutoActionEngine:
                 pass
             return
 
+        if queued:
+            try:
+                pid_i = int(pid or 0)
+            except Exception:
+                pid_i = 0
+            if pid_i > 0:
+                with self._state_lock:
+                    self._kill_blocked_pid[uid_s] = pid_i
+
         try:
             if queued:
                 self._log(f"[Auto-Actions] {uid_s}: kill step '{step.name}' queued process termination.")
             else:
                 self._log(f"[Auto-Actions] {uid_s}: kill step '{step.name}' could not queue process termination.")
+        except Exception:
+            pass
+
+    def _disable_user_step(self, step: ActionStep, uid: str, pid: Optional[int] = None) -> None:
+        uid_s = str(uid or "").strip()
+        if not uid_s:
+            try:
+                self._log(f"[Auto-Actions] disable step '{step.name}' skipped (missing user id).")
+            except Exception:
+                pass
+            return
+
+        # Invalidate alerts, triggers, inline calls, repeats, and later rows before
+        # handing persistence/process termination to the GUI thread.
+        self._cancel_queued_sequences_for_user(uid_s)
+
+        callback = self._disable_user_callback
+        if callback is None:
+            try:
+                self._log(
+                    f"[Auto-Actions] {uid_s}: disable step '{step.name}' skipped "
+                    "(disable callback unavailable)."
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            queued = bool(callback(uid_s))
+        except Exception as e:
+            try:
+                self._log(f"[Auto-Actions] {uid_s}: disable step '{step.name}' failed: {e!r}")
+            except Exception:
+                pass
+            return
+
+        if queued:
+            try:
+                pid_i = int(pid or 0)
+            except Exception:
+                pid_i = 0
+            if pid_i > 0:
+                with self._state_lock:
+                    self._kill_blocked_pid[uid_s] = pid_i
+
+        try:
+            if queued:
+                self._log(
+                    f"[Auto-Actions] {uid_s}: disable step '{step.name}' queued account disable "
+                    "and process termination."
+                )
+            else:
+                self._log(
+                    f"[Auto-Actions] {uid_s}: disable step '{step.name}' could not queue account disable."
+                )
         except Exception:
             pass
 
@@ -3042,6 +3499,7 @@ class AutoActionEngine:
             return True
 
         if step.kind == "action_row":
+            cancel_token = self._sequence_cancel_token(uid)
             with self._state_lock:
                 source_row_id = str(self._active_action_row_id or "")
                 source_chain = tuple(self._active_action_chain or ())
@@ -3061,10 +3519,15 @@ class AutoActionEngine:
                 chain=source_chain,
             )
             time.sleep(max(0.03, float(click_delay)))
-            return False
+            return self._sequence_cancel_token(uid) != cancel_token
 
         if step.kind == "kill_user":
-            self._kill_user_step(step, uid)
+            self._kill_user_step(step, uid, pid)
+            time.sleep(max(0.03, float(click_delay)))
+            return True
+
+        if step.kind == "disable_user":
+            self._disable_user_step(step, uid, pid)
             time.sleep(max(0.03, float(click_delay)))
             return True
 
@@ -3258,7 +3721,8 @@ class AutoActionEngine:
         click_delay: float,
         times: int,
         block_user_mouse_move: bool = False,
-    ) -> None:
+    ) -> bool:
+        cancel_token = self._sequence_cancel_token(uid)
         self._raise_if_menu_blocked(uid, pid)
         with _window_topmost_during(hwnd), _block_user_mouse_movement_during_actions(
             bool(block_user_mouse_move),
@@ -3284,6 +3748,7 @@ class AutoActionEngine:
                     rule_name=rule.name,
                 ):
                     break
+        return self._sequence_cancel_token(uid) != cancel_token
 
     def _execution_count(self, rule: ActionRule) -> int:
         if rule.repeat_mode in ("count", "count_per_trigger"):
@@ -3300,6 +3765,8 @@ class AutoActionEngine:
             self._completed_pids.pop(uid, None)
             self._completed_startup_rows.pop(uid, None)
             self._rule_signature.pop(uid, None)
+            self._sequence_cancel_generation.pop(uid, None)
+            self._kill_blocked_pid.pop(uid, None)
             return
 
         for mapping in (
@@ -3354,7 +3821,7 @@ class AutoActionEngine:
                 total += max(0.0, float(step.drag_duration_s or 0.0)) + max(0.03, delay)
             elif kind == "key":
                 total += max(0.0, float(step.key_hold_s or 0.0)) + max(0.03, delay)
-            elif kind in ("paste", "webhook", "action_row", "scroll", "kill_user"):
+            elif kind in ("paste", "webhook", "action_row", "scroll", "kill_user", "disable_user"):
                 total += max(0.03, delay)
                 if kind == "paste" and _FRAME_S > 0.02:
                     total += 3.0 * _FRAME_S
@@ -3562,7 +4029,15 @@ class AutoActionEngine:
             if not seq_map:
                 self._pending_trigger_seq.pop(uid_s, None)
 
-    def _dispatch_next_due_alert(self, cfg: Dict[str, Any], users: Sequence[str], *, click_delay: float) -> bool:
+    def _dispatch_next_due_alert(
+        self,
+        cfg: Dict[str, Any],
+        users: Sequence[str],
+        *,
+        click_delay: float,
+        parsed_rules: Optional[Sequence[Tuple[int, ActionRule]]] = None,
+        user_filters: Optional[Dict[int, Tuple[Optional[frozenset[str]], str, bool]]] = None,
+    ) -> bool:
         now = time.time()
         try:
             if now < float(self._last_alert_send_at or 0.0) + 1.0:
@@ -3572,11 +4047,19 @@ class AutoActionEngine:
 
         user_order = {str(uid): pos for pos, uid in enumerate(users or [])}
         candidates: List[Tuple[float, float, int, str, int, ActionRule]] = []
+        all_rules = list(parsed_rules) if parsed_rules is not None else self._rules_from_cfg(cfg)
+        filters = user_filters if user_filters is not None else self._compile_item_user_filters(cfg)
 
         with self._state_lock:
-            for uid in users or []:
+            # Usually this is empty. Avoid parsing/filtering rules for hundreds
+            # of accounts when no optional work is pending.
+            pending_uids = [uid for uid in self._pending_alert_send_at if str(uid) in user_order]
+            for uid in pending_uids:
                 uid_s = str(uid)
-                rules_by_idx = {int(idx): rule for idx, rule in self._rules_from_cfg(cfg, uid=uid_s)}
+                rules_by_idx = {
+                    int(idx): rule
+                    for idx, rule in self._parsed_rules_for_uid(all_rules, filters, uid_s)
+                }
                 pending = self._pending_use_at.get(uid_s) or {}
                 send_map = self._pending_alert_send_at.get(uid_s) or {}
                 for raw_idx, raw_send_at in list(send_map.items()):
@@ -3728,8 +4211,13 @@ class AutoActionEngine:
     ) -> List[Tuple[int, ActionRule]]:
         now = time.time()
         due: List[Tuple[int, ActionRule]] = []
+        biome_value = str(biome or "").strip().upper()
 
         with self._state_lock:
+            previous_biome = str(self._last_biomes.get(str(uid)) or "").strip().upper()
+            biome_changed = bool(biome_value and biome_value != previous_biome)
+            if biome_value:
+                self._last_biomes[str(uid)] = biome_value
             valid = {int(idx) for idx, _rule in (rules or [])}
             self._prune_state_for_user(str(uid), valid)
 
@@ -3739,6 +4227,8 @@ class AutoActionEngine:
             pending_seq = self._pending_trigger_seq.setdefault(str(uid), {})
             consumed = self._last_trigger_seq.setdefault(str(uid), {})
             completed_pids = self._completed_pids.setdefault(str(uid), {})
+            for pids in completed_pids.values():
+                pids.intersection_update({int(pid or 0)})
             completed_startup_rows = self._completed_startup_rows.setdefault(str(uid), set())
             signatures = self._rule_signature.setdefault(str(uid), {})
 
@@ -3751,7 +4241,22 @@ class AutoActionEngine:
                     pending.pop(idx_i, None)
                     pending_send.pop(idx_i, None)
                     pending_seq.pop(idx_i, None)
-                    consumed.pop(idx_i, None)
+                    if rule.trigger_type in ("ocr_filter", "merchant"):
+                        current_event = self._latest_trigger_event(
+                            str(uid),
+                            rule,
+                            current_pid=int(pid or 0),
+                            required_rule_signature=sig,
+                        )
+                        if current_event is None:
+                            # A rule edit must not make an event retained from
+                            # its previous configuration look new.
+                            consumed[idx_i] = max(
+                                int(consumed.get(idx_i, 0) or 0),
+                                int(self._trigger_seq or 0),
+                            )
+                    else:
+                        consumed.pop(idx_i, None)
                     completed_pids.pop(idx_i, None)
                     completed_startup_rows.discard(idx_i)
 
@@ -3804,6 +4309,15 @@ class AutoActionEngine:
                         continue
                     pending.pop(idx_i, None)
                     seq = int(pending_seq.pop(idx_i, 0) or 0)
+                    if seq > 0 and rule.trigger_type in ("ocr_filter", "merchant"):
+                        latest = self._latest_trigger_event(
+                            str(uid),
+                            rule,
+                            current_pid=int(pid or 0),
+                            required_rule_signature=hash(rule),
+                        )
+                        if latest is None or int(latest.get("seq", 0) or 0) < seq:
+                            continue
                     if now < float(next_ready.get(idx_i, 0.0)):
                         continue
                     if not self._eligible_in_biome(biome, rule):
@@ -3826,10 +4340,11 @@ class AutoActionEngine:
                 if self._has_sent_alert_countdown_locked():
                     continue
 
-                is_event_trigger = bool(
-                    (rule.trigger_type == "ocr_filter" and rule.trigger_filter_ids)
-                    or (rule.trigger_type == "merchant" and rule.trigger_merchants)
-                    or rule.trigger_type == "action_row"
+                is_event_trigger = rule.trigger_type in (
+                    "ocr_filter",
+                    "merchant",
+                    "biome",
+                    "action_row",
                 )
                 if not is_event_trigger:
                     if now < float(next_ready.get(idx_i, 0.0)):
@@ -3866,12 +4381,19 @@ class AutoActionEngine:
                     due.append((idx_i, rule))
                     continue
 
-                latest = self._latest_trigger_event(str(uid), rule)
+                latest = self._latest_trigger_event(
+                    str(uid),
+                    rule,
+                    current_pid=int(pid or 0),
+                    required_rule_signature=hash(rule),
+                )
+                if rule.trigger_type == "biome" and biome_changed:
+                    latest = {"seq": 1, "ts": now}
                 if latest is None:
                     continue
 
                 seq = int(latest.get("seq", 0) or 0)
-                if seq <= int(consumed.get(idx_i, 0) or 0):
+                if rule.trigger_type != "biome" and seq <= int(consumed.get(idx_i, 0) or 0):
                     continue
 
                 if now < float(next_ready.get(idx_i, 0.0)):
@@ -3943,6 +4465,11 @@ class AutoActionEngine:
                 self._stop.wait(timeout=max(0.5, interval))
                 continue
 
+            # Normalize action steps and per-rule user filters once per engine
+            # cycle, then reuse them for every live account.
+            all_rules = self._rules_from_cfg(cfg)
+            user_filters = self._compile_item_user_filters(cfg)
+
             try:
                 active_users = {str(uid) for uid in users}
             except Exception:
@@ -3954,9 +4481,19 @@ class AutoActionEngine:
                             self._pending_use_at.pop(str(pending_uid), None)
                             self._pending_alert_send_at.pop(str(pending_uid), None)
                             self._pending_trigger_seq.pop(str(pending_uid), None)
+                    for blocked_uid in list(self._kill_blocked_pid.keys()):
+                        if str(blocked_uid) not in active_users:
+                            self._kill_blocked_pid.pop(str(blocked_uid), None)
+                            self._sequence_cancel_generation.pop(str(blocked_uid), None)
 
             try:
-                self._dispatch_next_due_alert(cfg, users, click_delay=click_delay)
+                self._dispatch_next_due_alert(
+                    cfg,
+                    users,
+                    click_delay=click_delay,
+                    parsed_rules=all_rules,
+                    user_filters=user_filters,
+                )
             except Exception as e:
                 try:
                     self._log(f"[Auto-Actions] alert dispatch error: {e}")
@@ -3973,7 +4510,7 @@ class AutoActionEngine:
                         break
 
                     try:
-                        if not bool(self._cfg_snapshot().get("enabled", False)):
+                        if not self._enabled_snapshot():
                             break
                     except Exception:
                         pass
@@ -3985,7 +4522,11 @@ class AutoActionEngine:
                     except Exception:
                         pid = None
                     if not pid:
+                        self._pid_blocked_by_kill(uid, None)
                         self._cancel_overdue_pending_alerts(uid, now=now_ts, reason="window missing")
+                        continue
+
+                    if self._pid_blocked_by_kill(uid, pid):
                         continue
 
                     try:
@@ -4005,7 +4546,7 @@ class AutoActionEngine:
                         self._cancel_overdue_pending_alerts(uid, now=now_ts, reason="menu gate")
                         continue
 
-                    rules = self._rules_from_cfg(cfg, uid=uid)
+                    rules = self._parsed_rules_for_uid(all_rules, user_filters, uid)
                     if not rules:
                         with self._state_lock:
                             self._pending_use_at.pop(str(uid), None)
@@ -4091,7 +4632,7 @@ class AutoActionEngine:
                                             min_not_in_menu_s=float(rule.startup_delay_s),
                                             phase="activate",
                                         )
-                                    self._run_rule_on_window(
+                                    cancelled = self._run_rule_on_window(
                                         int(hwnd),
                                         rule,
                                         uid=str(uid),
@@ -4106,6 +4647,8 @@ class AutoActionEngine:
                                         self._active_action = None
                                         self._active_action_row_id = ""
                                         self._active_action_chain = ()
+                                if cancelled:
+                                    break
                         if used:
                             self._mark_used(uid, int(pid), used)
                             did_any = True
@@ -4134,7 +4677,13 @@ class AutoActionEngine:
                         pass
 
             try:
-                self._dispatch_next_due_alert(cfg, users, click_delay=click_delay)
+                self._dispatch_next_due_alert(
+                    cfg,
+                    users,
+                    click_delay=click_delay,
+                    parsed_rules=all_rules,
+                    user_filters=user_filters,
+                )
             except Exception as e:
                 try:
                     self._log(f"[Auto-Actions] alert dispatch error: {e}")
@@ -4142,7 +4691,7 @@ class AutoActionEngine:
                     pass
 
             try:
-                if not bool(self._cfg_snapshot().get("enabled", False)):
+                if not self._enabled_snapshot():
                     continue
             except Exception:
                 pass
@@ -4236,7 +4785,7 @@ class AutoActionEngine:
                                 min_not_in_menu_s=float(rule.startup_delay_s),
                                 phase="test-activate",
                             )
-                        self._run_rule_on_window(
+                        cancelled = self._run_rule_on_window(
                             int(hwnd),
                             rule,
                             uid=str(uid),
@@ -4250,6 +4799,8 @@ class AutoActionEngine:
                             self._active_action = None
                             self._active_action_row_id = ""
                             self._active_action_chain = ()
+                    if cancelled:
+                        break
             self._log("[Auto-Actions] Test: complete.")
             return True
         except _MenuGateBlocked as e:

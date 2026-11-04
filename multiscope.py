@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 import base64
+from bisect import bisect_left, insort_right
 import hashlib
 import os, re, json, time, threading, requests
 import time as _t
@@ -21,14 +22,20 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor
+from background_delivery import BackgroundDeliveryPool
+from multiscope_metrics import RollingTimings
+from log_handle_cache import LogHandleCache, open_shared_log
+from events import EVENTS, EVENT_ASSET_PREFILTERS, build_event_payload, event_webhook_targets, iter_event_matches
 from log_utils import (
     RobloxLogIndex,
+    LogMatch,
     find_log_for_username,
     R_DISC_REASON, R_DISC_NOTIFY, R_DISC_SENDING, R_CONN_LOST,
 )
 
 _ACCESS_ENV_NAME = "".join(chr(c) for c in (74, 65, 82, 65, 77, 95, 85, 78, 76, 79, 67, 75))
 _ACCESS_MARKER_NAME = "".join(chr(c) for c in (74, 65, 82, 65, 77, 46, 98, 105, 117))
+_DEV_ONLY_PACKAGE = "dev_only"
 
 # Optional biomes metadata (color, thumbnail). Fallbacks if missing.
 try:
@@ -39,7 +46,7 @@ except Exception:
         return int(0x3BA55D), ""     # default color, empty thumbnail
     def biome_names() -> list[str]:
         return ["NORMAL"]
-APP_FOOTER = "M.J.JARAM JX 2x71"
+from version import APP_FOOTER  # single source of truth: version.py
 HARD_EVERYONE_BIOMES = {"GLITCHED", "DREAMSPACE", "CYBERSPACE"}
 
 # Webhook send retry budget per hook, by biome tier. Priority biomes are rare and
@@ -59,7 +66,6 @@ _PLAYER_JOIN_RE = re.compile(
     r"load failed in Workspace\.(?P<PlayerName>[0-9a-zA-Z]+(_[0-9a-zA-Z]+)?)\.Humanoid\.Clothes:",
     re.MULTILINE,
 )
-_LOOKUP_SAVE_LOCK = threading.Lock()
 # ------------------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------------------
@@ -118,9 +124,17 @@ def _normalize_user_filter_mode(value: object) -> str:
 
 # Parse [BloxstrapRPC] JSON blobs strictly
 _LOG_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z")
+_STANDALONE_CR_RE = re.compile(rb"\r(?!\n)")
+_CORE_LOG_LINE_MARKERS = (
+    b"[bloxstraprpc]", b"disconnect", b"connection lost", b"rbxassetid://", b"[merchant",
+)
 _R_RPC_MARK = "[BloxstrapRPC]"
 _R_JSON_START = re.compile(r"\{")
 _CURSOR_ANCHOR_BYTES = 256
+
+
+class _StaleLogHandle(Exception):
+    pass
 
 
 def _generation_identity_without_revision(generation_id: object) -> str:
@@ -151,6 +165,41 @@ def _parse_log_ts_epoch(ts_text: str) -> Optional[float]:
         return float(datetime.fromisoformat(str(ts_text or "").replace("Z", "+00:00")).timestamp())
     except Exception:
         return None
+
+
+def _first_line_timestamps(text: str) -> Iterable[str]:
+    position = 0
+    while True:
+        match = _LOG_TS_RE.search(text, position)
+        if match is None:
+            return
+        yield match.group(0)
+        newline = text.find("\n", match.end())
+        if newline < 0:
+            return
+        position = newline + 1
+
+
+def _latest_complete_line_timestamp(text: str) -> Optional[float]:
+    """Find the newest first-on-line timestamp, parsing normally once per block."""
+    newest = None
+    newest_key = None
+    for stamp in _first_line_timestamps(text):
+        key = stamp[:19] + stamp[20:-1].ljust(6, "0")
+        if newest_key is None or key > newest_key:
+            newest, newest_key = stamp, key
+    if newest is None:
+        return None
+    parsed = _parse_log_ts_epoch(newest)
+    if parsed is not None:
+        return parsed
+    # A malformed date must not hide an earlier valid date in this block.
+    latest = None
+    for stamp in _first_line_timestamps(text):
+        parsed = _parse_log_ts_epoch(stamp)
+        if parsed is not None:
+            latest = parsed if latest is None else max(latest, parsed)
+    return latest
 
 def _extract_log_ts_epoch_before(text: str, marker_index: int) -> Optional[float]:
     try:
@@ -257,19 +306,14 @@ MERCHANT_ASSET_IDS = {
     "18247420806": "Jester",
     "18247165978": "Mari",
     "97148159887178": "Rin",
-    # Sinister S. boss: jump + walk animations, either one counts (deduped per server).
-    "136698315787897": "Sinister S.",
-    "79637662709262": "Sinister S.",
 }
-# ponytail: one alert per server per boss visit; widen if it re-alerts mid-fight.
-SINISTER_DEDUPE_WINDOW_S = 300.0
 
 # Merchant asset-id lines - only the animation asset ID matters; the
 # Workspace.Map.* segment is intentionally ignored because it is random.
 MERCHANT_ASSET_RE = re.compile(
     r"^(?P<full_line>"
     r"(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{0,6})?Z),"
-    r"[^\n]*?rbxassetid://(?P<asset_id>97148159887178|18247420806|18247165978|136698315787897|79637662709262)"
+    r"[^\n]*?rbxassetid://(?P<asset_id>97148159887178|18247420806|18247165978)"
     r"[^\n]*"
     r")$",
     re.IGNORECASE | re.MULTILINE
@@ -305,364 +349,6 @@ BIOME_RPC_RE = re.compile(
 
 
 # ------------------------------------------------------------------------------
-# Blocker
-# ------------------------------------------------------------------------------
-
-class _TempBlockSession(threading.Thread):
-    """
-    3-minute temp blocker for one 'finder' account.
-    - Uses Roblox user-blocking API (no browser)
-    - Tails their log for 'Player added: <name> <id>'
-    - Blocks only names present in Blank 
-    - Grows lookups/blocklist via Bloxlink reverse search
-    - Unblocks any IDs we blocked when the window ends
-    """
-    GUILD_ID = "1371698242886307921"   # your server (can be moved to credentials if you prefer)
-    WINDOW_SEC = 180
-
-    def __init__(self, log_fn, uid: str, username: str, cookie: str):
-        super().__init__(daemon=True)
-        self._log = log_fn
-        self.uid = str(uid)
-        self.username = str(username or "").strip()
-        self.cookie = cookie
-        self._stop = False
-        self._blocked_ids = set()
-        self._seen_ids = set()
-        self._pending: list[tuple[str, str]] = []  # (username, roblox_id) carried across ticks
-        self._log_carry = b""
-
-    # ---------- Jaram files ----------
-    @staticmethod
-    def _jaram_dir() -> Path:
-        base = os.environ.get("APPDATA") or ""
-        p = Path(base) / "Jaram" if base else Path.cwd() / "Jaram"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    @classmethod
-    def _lookup_path(cls) -> Path:
-        return cls._jaram_dir() / "lookup.json"
-
-    @classmethod
-    def _cred_path(cls) -> Path:
-        return cls._jaram_dir() / "credentials.json"
-
-    @classmethod
-    def _load_lookup(cls) -> dict:
-        p = cls._lookup_path()
-        if p.exists():
-            try:
-                return json.loads(p.read_text(encoding="utf-8")) or {}
-            except Exception:
-                pass
-        return {"lookups": {}, "blocklist": []}
-
-    @classmethod
-    def _save_lookup(cls, obj: dict) -> None:
-        p = cls._lookup_path()
-        # Use a unique tmp name per thread to avoid collisions, still guarded by a lock
-        tmp = p.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-        with _LOOKUP_SAVE_LOCK:
-            tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
-            # Atomic replace on Windows 10+ and modern Python
-            tmp.replace(p)
-
-
-    @classmethod
-    def _bloxlink_key(cls) -> str:
-        p = cls._cred_path()
-        try:
-            data = json.loads(p.read_text(encoding="utf-8")) or {}
-            return str(data.get("bloxlink_api_key") or "")
-        except Exception:
-            return ""
-
-    # ---------- Decisions ----------
-    @staticmethod
-    def _in_blocklist(name: str, lk: dict) -> bool:
-        bl = [str(x).lower() for x in (lk.get("blocklist") or [])]
-        return name.lower() in bl
-
-    @staticmethod
-    def _in_lookups(name: str, lk: dict) -> bool:
-        nm = name.lower()
-        for arr in (lk.get("lookups") or {}).values():
-            for item in arr or []:
-                if str(item).lower() == nm:
-                    return True
-        return False
-
-    @classmethod
-    def _add_to_lookups(cls, lk: dict, discord_id: str, username: str) -> None:
-        lookups = lk.setdefault("lookups", {})
-        arr = lookups.setdefault(str(discord_id), [])
-        if username not in arr and username.lower() not in [a.lower() for a in arr]:
-            arr.append(username)
-
-    @classmethod
-    def _append_blocklist(cls, lk: dict, username: str) -> None:
-        bl = lk.setdefault("blocklist", [])
-        if username not in bl and username.lower() not in [b.lower() for b in bl]:
-            bl.append(username)
-
-    # ---------- Bloxlink reverse ----------
-    def _bloxlink_reverse(self, roblox_id: str) -> str | None:
-        """
-        Map Roblox userId -> Discord ID via Bloxlink using *plain* Authorization header.
-        Supports response shapes:
-          - {"user":{"id":"..."}}
-          - {"discordID":"..."} or {"discordId":"..."}
-          - {"discordIDs":["..."]}    a plural form (pick first)
-        Returns Discord ID string or None. Logs status so you can verify it ran.
-        """
-        key = self._bloxlink_key()
-        if not key:
-            self._log("[TempBlock] Bloxlink key missing; reverse lookup skipped")
-            return None
-
-        guild_id = self.GUILD_ID
-        url = f"https://api.blox.link/v4/public/guilds/{guild_id}/roblox-to-discord/{roblox_id}"
-        headers = {"Authorization": key}
-
-        # 3 tries total, short timeouts, quick backoff on transient failures
-        timeouts = (5, 5, 5)  # seconds per attempt
-        backoffs = (0.5, 1) # between attempts
-        for i, to in enumerate(timeouts):
-            try:
-                r = requests.get(url, headers=headers, timeout=to)
-                status = r.status_code
-                try:
-                    data = r.json()
-                except Exception:
-                    data = None
-
-                self._log(f"[TempBlock] Bloxlink - {status} for {roblox_id} (guild {guild_id})")
-
-                if isinstance(data, dict) and data.get("error"):
-                    self._log(f"[TempBlock] Bloxlink error: {data.get('error')}")
-
-                if status == 200 and isinstance(data, dict):
-                    # 1) {"user":{"id":"..."}}
-                    if isinstance(data.get("user"), dict) and data["user"].get("id"):
-                        return str(data["user"]["id"])
-                    # 2) {"discordID":"..."} / {"discordId":"..."}
-                    if data.get("discordID"):
-                        return str(data["discordID"])
-                    if data.get("discordId"):
-                        return str(data["discordId"])
-                    # 3) {"discordIDs":["..."]}
-                    if isinstance(data.get("discordIDs"), list) and data["discordIDs"]:
-                        return str(data["discordIDs"][0])
-                    # 200 but unknown shape - treat as no mapping
-                    return None
-
-                # 204/404/400/etc - no mapping; don't retry
-                if status not in (500, 502, 503, 504):   # only retry server errors
-                    return None
-
-            except (_rq_exc.Timeout, _rq_exc.ConnectionError) as e:
-                self._log(f"[TempBlock] Bloxlink timeout/network error (try {i+1}/3): {e}")
-            except Exception as e:
-                self._log(f"[TempBlock] Bloxlink exception (try {i+1}/3): {e}")
-
-            # retry if we have remaining attempts
-            if i < len(backoffs):
-                time.sleep(backoffs[i])
-
-        # fell through without success
-        self._log("[TempBlock] Bloxlink: giving up after retries")
-        return None
-
-    # ---------- Roblox user-blocking API ----------
-    def _make_session(self):
-        from utilities_tab import _make_blocking_api_session  # lazy-import to avoid init cycles
-        return _make_blocking_api_session(self.cookie)
-
-    def _block_id(self, session, user_id: str) -> str:
-        from utilities_tab import _api_block_user
-        return _api_block_user(session, self.cookie, user_id)
-
-    def _unblock_id(self, session, user_id: str) -> str:
-        from utilities_tab import _api_unblock_user
-        return _api_unblock_user(session, self.cookie, user_id)
-
-    # ---------- Tail the finder's log ----------
-    def _tail_new_players(self, f) -> list[tuple[str, str]]:
-        """Read any new lines and return [(username, id), ...] that match."""
-        found = []
-        raw = f.read(256 * 1024)
-        if not raw:
-            return found
-        combined = self._log_carry + raw
-        parts = combined.split(b"\n")
-        self._log_carry = parts.pop() if parts else combined
-        if len(self._log_carry) > 1024 * 1024:
-            self._log_carry = b""
-        for line_raw in parts:
-            line = line_raw.rstrip(b"\r").decode("utf-8", errors="replace")
-            if "Player added:" not in line:
-                continue
-            m = re.search(r"Player added:\s+([A-Za-z0-9_]+)\s+(\d+)", line)
-            if m:
-                uname = m.group(1)
-                rid = m.group(2)
-                found.append((uname, rid))
-        if self._log_carry:
-            tail = self._log_carry.decode("utf-8", errors="replace")
-            match = re.search(r"Player added:\s+([A-Za-z0-9_]+)\s+(\d+)", tail)
-            if match:
-                found.append((match.group(1), match.group(2)))
-                self._log_carry = b""
-        return found
-
-    # ---------- Main ----------
-    def run(self):
-        if not self.cookie or not self.username:
-            self._log(f"[TempBlock] {self.uid}: missing cookie/username")
-            return
-
-        # Create API session up front (CSRF + browserid)
-        try:
-            session = self._make_session()
-        except Exception as e:
-            self._log(f"[TempBlock] {self.uid}: failed to start API session ({e})")
-            return
-
-        # Prepare log tail
-        log_path = find_log_for_username(self.username.lower(), allow_fallback=False)
-        if not log_path or not os.path.isfile(log_path):
-            self._log(f"[TempBlock] {self.uid}: no log for '{self.username}'")
-            try: session.close()
-            except Exception: pass
-            return
-
-        try:
-            f = open(log_path, "rb")
-        except Exception as e:
-            self._log(f"[TempBlock] {self.uid}: cannot open log ({e})")
-            try: session.close()
-            except Exception: pass
-            return
-
-        # Seek to end so we only see new players after the spawn
-        try:
-            f.seek(0, os.SEEK_END)
-        except Exception:
-            pass
-
-        # Load lookup once; we'll persist changes as they occur
-        lookup = self._load_lookup()
-
-        deadline = time.time() + self.WINDOW_SEC
-        self._log(f"[TempBlock] {self.uid}: window OPEN ({self.WINDOW_SEC}s)")
-
-        try:
-            while time.time() < deadline and not self._stop:
-                # --- SURGE-AWARE PER-TICK LOGIC ---
-                tick_deadline = time.time() + 0.10  # ~100ms budget per tick
-
-                # merge any leftover work from the previous tick with fresh arrivals
-                new_players = self._tail_new_players(f)
-                batch = (self._pending + new_players)
-                self._pending = []
-
-                surge = len(batch) >= 20  # tune threshold as you like
-                if surge:
-                    self._log(f"[TempBlock] {self.uid}: SURGE mode ({len(batch)} new) - skipping Bloxlink")
-
-                for uname, rid in batch:
-                    # budget guard FIRST: if we're out of time, queue this work for next tick
-                    if time.time() > tick_deadline:
-                        self._pending.append((uname, rid))
-                        continue
-
-                    if rid in self._seen_ids:
-                        continue
-
-                    # only mark "seen" once we *know* we'll process this entry now
-                    # (prevents losing users when we run out of budget)
-                    # --- Known bad - block immediately ---
-                    if self._in_blocklist(uname, lookup):
-                        res = self._block_id(session, rid)
-                        if res in ("blocked", "already_blocked"):
-                            self._blocked_ids.add(rid)
-                            self._log(f"[TempBlock] blocked @{uname} ({rid}) on {self.uid} - {res} [blocklist]")
-                        else:
-                            self._log(f"[TempBlock] failed blocking @{uname} ({rid}) on {self.uid} - {res} [blocklist]")
-                        self._seen_ids.add(rid)
-                        continue
-
-                    # --- Already mapped - skip ---
-                    if self._in_lookups(uname, lookup):
-                        self._log(f"[TempBlock] @{uname} already mapped in lookups - skip")
-                        self._seen_ids.add(rid)
-                        continue
-
-                    if surge:
-                        # SURGE path: skip Bloxlink; block now
-                        self._append_blocklist(lookup, uname)
-                        self._save_lookup(lookup)
-                        self._log(f"[TempBlock] (SURGE) @{uname} - added to blocklist & blocking now")
-                        res = self._block_id(session, rid)
-                        if res in ("blocked", "already_blocked"):
-                            self._blocked_ids.add(rid)
-                            self._log(f"[TempBlock] (SURGE) blocked @{uname} ({rid}) on {self.uid} - {res}")
-                        else:
-                            self._log(f"[TempBlock] (SURGE) failed blocking @{uname} ({rid}) on {self.uid} - {res}")
-                        self._seen_ids.add(rid)
-                        continue
-
-                    # Normal path: Bloxlink quick try; else block+record
-                    self._log(f"[TempBlock] Bloxlink reverse lookup for @{uname} ({rid})")
-                    d_id = self._bloxlink_reverse(rid)
-
-                    if d_id:
-                        self._add_to_lookups(lookup, d_id, uname)
-                        self._save_lookup(lookup)
-                        self._log(f"[TempBlock] @{uname} - Discord {d_id} (added to lookups)")
-                        # no block
-                    else:
-                        self._append_blocklist(lookup, uname)
-                        self._save_lookup(lookup)
-                        self._log(f"[TempBlock] @{uname} - no Bloxlink match; added to blocklist and blocking now")
-                        res = self._block_id(session, rid)
-                        if res in ("blocked", "already_blocked"):
-                            self._blocked_ids.add(rid)
-                            self._log(f"[TempBlock] blocked @{uname} ({rid}) on {self.uid} - {res} [unknown-blocklist]")
-                        else:
-                            self._log(f"[TempBlock] failed blocking @{uname} ({rid}) on {self.uid} - {res} [unknown-blocklist]")
-
-                    # we actually processed this entry this tick - safe to mark seen
-                    self._seen_ids.add(rid)
-                    
-                time.sleep(0.25)
-
-        except Exception as e:
-            self._log(f"[TempBlock] {self.uid}: loop crashed - {e!r}")
-        finally:
-            # Always close the log file
-            try:
-                f.close()
-            except Exception:
-                pass
-
-        # Unblock everyone we blocked during this window
-        if self._blocked_ids:
-            self._log(f"[TempBlock] {self.uid}: window CLOSED - unblocking {len(self._blocked_ids)} id(s)")
-            for rid in list(self._blocked_ids):
-                res = self._unblock_id(session, rid)
-                if res in ("unblocked", "already_unblocked"):
-                    self._log(f"[TempBlock] unblocked {rid} - {res}")
-                else:
-                    self._log(f"[TempBlock] unblock failed {rid} - {res}")
-        else:
-            self._log(f"[TempBlock] {self.uid}: window CLOSED - nothing to unblock")
-
-        try: session.close()
-        except Exception: pass
-
-# ------------------------------------------------------------------------------
 # Data
 # ------------------------------------------------------------------------------
 
@@ -695,10 +381,25 @@ class Cursor:
     observed_size: int = 0
     last_event_ts: float = 0.0
     dropping_oversized: bool = False
+    anchor_tail: bytes = b""
+    anchor_pos: int = 0
+
+    def remember_read(self, data: bytes, start: int) -> None:
+        """Keep the resume proof from bytes already read; snapshotting needs no I/O."""
+        previous = self.anchor_tail if self.anchor_pos == start else b""
+        self.anchor_tail = (data[-_CURSOR_ANCHOR_BYTES:] if len(data) >= _CURSOR_ANCHOR_BYTES
+                            else (previous + data)[-_CURSOR_ANCHOR_BYTES:])
+        self.anchor_pos = start + len(data)
 
 # ------------------------------------------------------------------------------
 # Engine
 # ------------------------------------------------------------------------------
+
+class _NoEventHolds:
+    """Stands in for bes_event_holds.BESEventHoldController when that module is missing."""
+    def __getattr__(self, _name):
+        return lambda *args, **kwargs: None
+
 
 class MultiScopeEngine:
     def __init__(
@@ -711,6 +412,8 @@ class MultiScopeEngine:
         get_cookie_for_user,            # NEW
         stats_path: Optional[str] = None,
         log_fn: Optional[Callable[[str], None]] = None,
+        member_lookup: Optional[Callable] = None,
+        service_notify: Optional[Callable] = None,
     ):
         self._get_username = get_username
         self._get_server_label = get_server_label
@@ -718,6 +421,7 @@ class MultiScopeEngine:
         self._get_owner = get_server_owner_for_user or (lambda uid: "")
         self._get_cookie_for_user = get_cookie_for_user   # NEW
         self._log = log_fn or (lambda _msg: None)
+        self._development_service_notify = service_notify
 
         self._cur: Dict[str, Cursor] = {}
         self._tracked_uids: Set[str] = set()
@@ -744,6 +448,7 @@ class MultiScopeEngine:
             "backlog_users": 0,
         }
         self._reader_stats_lock = threading.Lock()
+        self._timings = RollingTimings()
 
         # Handoff: donor_uid - spare_uid
         self._handoffs: Dict[str, str] = {}
@@ -770,7 +475,9 @@ class MultiScopeEngine:
         # Webhooks
         self._biome_webhooks: List[dict] = []
         self._player_tracker_hook: str = ""
-        self._sinister_hook: str = ""
+        self._event_webhooks: List[dict] = []
+        self._disabled_log_events: Set[str] = set()
+        self._last_event_ts_by_scope: Dict[str, Dict[str, float]] = {}
         self._skip_webhook_unknown_context = False
 
         self._lock = threading.Lock()
@@ -792,6 +499,17 @@ class MultiScopeEngine:
         self._stats_path = str(stats_path or "").strip()
         self._stats_lock = threading.Lock()
         self._found_stats: dict = self._default_found_stats()
+        self._stats_dirty = False
+        self._stats_next_save_mono = 0.0
+        self._stats_save_interval_seconds = 1.0
+        self._stats_revision = 0
+        self._stats_wake = threading.Event()
+        self._stats_stop = threading.Event()
+        self._stats_writer = None
+        self._stats_last_error_log = 0.0
+        self._stats_save_failures = 0
+        self._stats_last_error_type = ''
+        self._stats_last_saved_mono = 0.0
         self._load_found_stats()
         self._ensure_found_stats_catalog()
 
@@ -807,11 +525,16 @@ class MultiScopeEngine:
             max_workers=self._tail_workers,
             thread_name_prefix="ms-tail",
         )
+        self._log_handles = LogHandleCache(256, close_handle=self._close_tail_handle)
         self._tail_scope_locks: Dict[str, threading.RLock] = {}
         self._tail_scope_locks_lock = threading.Lock()
 
         # Webhook delivery remains off the reader pool.
-        self._send_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ms-send")
+        # ponytail: 16 workers so one rate-limited webhook (its sends wait in webhook_gate) can't
+        # hold up the others; webhook_gate is the only queue that paces Discord.
+        self._send_executor = BackgroundDeliveryPool(
+            max_workers=16, max_pending=1024, thread_name_prefix="ms-send", overflow_log=self._log,
+        )
         if webhook_gate.on_rate_limited is None:  # engine runs in its own process: tell the GUI
             webhook_gate.on_rate_limited = lambda u, w, g: self._emit_event(
                 "webhook_rate_limited", "", json.dumps([u, w, g])
@@ -851,8 +574,19 @@ class MultiScopeEngine:
         # Track which biomes were forced to Everyone due to lock enforcement.
         self._lock_forced_biomes: Set[str] = set()
 
-        self._temp_block_sessions = {}  # uid -> expiry epoch (simple gate)
-        self._temp_block_disabled: bool = True
+        try:
+            from bes_event_holds import BESEventHoldController
+            self._bes_event_holds = BESEventHoldController(self, service_notify)
+        except ImportError:  # ponytail: a build without the BES port; holds just never start
+            self._bes_event_holds = _NoEventHolds()
+        self._development_runtime = None
+        try:
+            from dev_only.runtime import DevelopmentRuntime
+            self._development_runtime = DevelopmentRuntime(
+                self, member_lookup or (lambda *args: {"ok": False})
+            )
+        except ImportError:
+            pass
 
     # -- Config ----------------------------------------------------------------
 
@@ -874,7 +608,8 @@ class MultiScopeEngine:
         skip_webhook_unknown_context: bool = False,
         in_menu_none_timeout_seconds: float = 120.0,
         player_tracker_hook: str = "",
-        sinister_hook: str = "",
+        event_webhooks: Optional[List[dict]] = None,
+        disabled_log_events: Optional[List[str]] = None,
     ) -> None:
         lock_enforced = self._is_bm_lock_enforced()
         lock_disabled = not lock_enforced
@@ -938,6 +673,8 @@ class MultiScopeEngine:
             normalized_hooks.append(nh)
 
         self._biome_webhooks = normalized_hooks
+        self._event_webhooks = list(event_webhooks or [])
+        self._disabled_log_events = set(disabled_log_events or [])
         self._merchant_hook = (merchant_hook or "").strip()
         self._merchant_filters = {
             "Jester": bool(enable_jester),
@@ -955,7 +692,6 @@ class MultiScopeEngine:
         self._lock_forced_biomes = forced_biomes
         self._skip_webhook_unknown_context = bool(skip_webhook_unknown_context)
         self._player_tracker_hook = (player_tracker_hook or "").strip()
-        self._sinister_hook = (sinister_hook or "").strip()
         try:
             self._in_menu_none_timeout_seconds = max(
                 1.0,
@@ -1172,20 +908,77 @@ class MultiScopeEngine:
             self._prune_found_events_locked(now_ts=time.time())
 
     def _save_found_stats_locked(self) -> None:
-        path = getattr(self, "_stats_path", "") or ""
-        if not path:
+        """Request a coalesced save; callers hold the statistics lock."""
+        self._stats_revision += 1
+        if not self._stats_path:
+            self._stats_dirty = False
             return
-        try:
-            dirpath = os.path.dirname(path)
-            if dirpath:
-                os.makedirs(dirpath, exist_ok=True)
-        except Exception:
-            pass
+        self._stats_dirty = True
+        if self._stats_writer is None:
+            self._stats_writer = threading.Thread(
+                target=self._run_stats_writer, name="ms-statistics", daemon=True,
+            )
+            self._stats_writer.start()
+        self._stats_wake.set()
 
+    def _run_stats_writer(self) -> None:
+        while True:
+            self._stats_wake.wait()
+            self._stats_wake.clear()
+            delay = max(0.0, self._stats_next_save_mono - time.monotonic())
+            self._stats_stop.wait(delay)
+            with self._stats_lock:
+                revision = self._stats_revision
+                dirty = self._stats_dirty
+                # Events are immutable after insertion; copy containers only.
+                snapshot = {key: (dict(value) if isinstance(value, dict) else
+                                  list(value) if isinstance(value, list) else value)
+                            for key, value in self._found_stats.items()} if dirty else None
+            if snapshot is not None:
+                save_began = time.monotonic()
+                try:
+                    self._write_found_stats_snapshot(snapshot)
+                except Exception as exc:
+                    with self._stats_lock:
+                        self._stats_save_failures += 1
+                        self._stats_last_error_type = type(exc).__name__
+                    now = time.monotonic()
+                    if now >= self._stats_last_error_log:
+                        self._stats_last_error_log = now + 30.0
+                        self._log("[MultiScope] Statistics save failed; pending changes retained for retry.")
+                else:
+                    with self._stats_lock:
+                        self._stats_last_saved_mono = time.monotonic()
+                        self._stats_last_error_type = ''
+                        if self._stats_revision == revision:
+                            self._stats_dirty = False
+                finally:
+                    self._timings.record('statistics_write', (time.monotonic()-save_began)*1000)
+                self._stats_next_save_mono = time.monotonic() + self._stats_save_interval_seconds
+            with self._stats_lock:
+                dirty = self._stats_dirty
+                newer = self._stats_revision != revision
+            if self._stats_stop.is_set():
+                # At shutdown producers have stopped. One final attempt above
+                # flushes the latest snapshot without an infinite disk retry.
+                if dirty and newer:
+                    self._stats_wake.set()
+                    continue
+                return
+            if dirty:
+                self._stats_wake.set()
+
+    def _write_found_stats_snapshot(self, snapshot: dict) -> None:
+        """Serialize and atomically replace on the dedicated writer thread."""
+        path = getattr(self, "_stats_path", "") or ""
+        dirpath = os.path.dirname(path)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
         tmp = f"{path}.tmp"
         try:
+            serialized = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self._found_stats, f, ensure_ascii=False, indent=2)
+                f.write(serialized)
             os.replace(tmp, path)
         except Exception:
             try:
@@ -1193,6 +986,30 @@ class MultiScopeEngine:
                     os.remove(tmp)
             except Exception:
                 pass
+            raise
+
+    def _flush_found_stats_locked(self) -> None:
+        if self._stats_dirty:
+            self._stats_wake.set()
+
+    def _record_found_event_locked(self, kind: str, value: str, ts: float) -> None:
+        totals = self._found_stats.setdefault(f"{kind}s_total", {})
+        try:
+            totals[value] = int(totals.get(value, 0)) + 1
+        except Exception:
+            totals[value] = 1
+        events = self._found_stats.setdefault(f"{kind}_events", [])
+        # Logs from different accounts can arrive out of timestamp order.
+        # Most events append; bisect also handles delayed events without
+        # rebuilding and sorting the entire month's history per detection.
+        insort_right(events, {"ts": ts, kind: value}, key=lambda ev: ev["ts"])
+        cutoff = time.time() - (31 * 24 * 3600)
+        expired = bisect_left(events, cutoff, key=lambda ev: ev["ts"])
+        remove_count = max(expired, len(events) - 20_000)
+        if remove_count > 0:
+            del events[:remove_count]
+        self._stats_dirty = True
+        self._save_found_stats_locked()
 
     def _record_found_biome(self, biome: str, *, ts_epoch: Optional[float] = None) -> None:
         b = str(biome or "").strip().upper()
@@ -1204,15 +1021,7 @@ class MultiScopeEngine:
             ts = time.time()
 
         with self._stats_lock:
-            bt = self._found_stats.setdefault("biomes_total", {})
-            try:
-                bt[b] = int(bt.get(b, 0)) + 1
-            except Exception:
-                bt[b] = 1
-
-            self._found_stats.setdefault("biome_events", []).append({"ts": ts, "biome": b})
-            self._prune_found_events_locked(now_ts=ts)
-            self._save_found_stats_locked()
+            self._record_found_event_locked("biome", b, ts)
 
     def _record_found_merchant(self, merchant: str, *, ts_epoch: Optional[float] = None) -> None:
         m = str(merchant or "").strip().title()
@@ -1223,21 +1032,12 @@ class MultiScopeEngine:
         except Exception:
             ts = time.time()
         with self._stats_lock:
-            mt = self._found_stats.setdefault("merchants_total", {})
-            try:
-                mt[m] = int(mt.get(m, 0)) + 1
-            except Exception:
-                mt[m] = 1
-            self._found_stats.setdefault("merchant_events", []).append({"ts": ts, "merchant": m})
-            self._prune_found_events_locked(now_ts=ts)
-            self._save_found_stats_locked()
+            self._record_found_event_locked("merchant", m, ts)
 
     def get_found_stats_snapshot(self) -> dict:
         with self._stats_lock:
-            snap = json.loads(json.dumps(self._found_stats))
-
-        bt = snap.get("biomes_total") if isinstance(snap.get("biomes_total"), dict) else {}
-        mt = snap.get("merchants_total") if isinstance(snap.get("merchants_total"), dict) else {}
+            bt = dict(self._found_stats.get("biomes_total") or {})
+            mt = dict(self._found_stats.get("merchants_total") or {})
         try:
             biome_total = sum(int(v) for v in bt.values())
         except Exception:
@@ -1327,12 +1127,22 @@ class MultiScopeEngine:
 
     # -- User mapping / logs ---------------------------------------------------
 
-    def update_users(self, user_ids: List[str]) -> None:
-        # Advance discovery once for the whole account set.  Resolving each
-        # username used to run another bounded scan, so a cold resume with many
-        # users could spend over a minute here before processing queued state.
-        self._log_index.poll(force=True)
+    def update_users(
+        self,
+        user_ids: List[str],
+        refresh_user_ids: Optional[Set[str]] = None,
+        *,
+        resume_state: Optional[dict] = None,
+    ) -> None:
         user_ids_set = {str(uid) for uid in (user_ids or [])}
+        previous_uids = set(self._tracked_uids)
+        added_uids = user_ids_set - previous_uids
+        refresh_uids = {
+            str(uid) for uid in (refresh_user_ids or set()) if str(uid) in user_ids_set
+        }
+        resolve_uids = added_uids | refresh_uids
+        # Discovery and username resolution are expensive. Existing users keep
+        # their cursor; only new/renamed users need to be resolved again.
         self._tracked_uids = set(user_ids_set)
         with self._lock:
             # remove stale only
@@ -1340,6 +1150,10 @@ class MultiScopeEngine:
                 str(uid)
                 for uid in (
                     set(self._cur.keys())
+                    | previous_uids
+                    | set(self._status_snapshot)
+                    | set(self._first_merchant_scan_done)
+                    | set(self._menu_none_disconnect_fired_by_uid)
                     | set(self._retired_generations_by_uid.keys())
                     | set(self._menu_unknown_log_by_uid.keys())
                     | set(self._menu_none_since_by_uid.keys())
@@ -1356,6 +1170,7 @@ class MultiScopeEngine:
                 if str(uid) not in user_ids_set
             }
             for uid in stale_uids:
+                self._bes_event_holds.release(uid)
                 stale_cur = self._cur.pop(uid, None)
                 if stale_cur and stale_cur.generation_id:
                     self._log_index.unpin(stale_cur.generation_id)
@@ -1367,13 +1182,77 @@ class MultiScopeEngine:
                 self._process_generation_by_uid.pop(uid, None)
                 self._last_disconnect_sig_by_uid.pop(uid, None)
                 self._log_resolution_suspended_uids.discard(uid)
+                self._menu_none_disconnect_fired_by_uid.discard(uid)
+                self._first_merchant_scan_done.discard(uid)
+                self._status_snapshot.pop(uid, None)
+                self._handoff_prev_biome_for_spare.pop(uid, None)
+            self._handoffs = {
+                donor: spare for donor, spare in self._handoffs.items()
+                if donor in user_ids_set and spare in user_ids_set
+            }
+            with self._event_lock:
+                self._events = [event for event in self._events if str(event[1]) in user_ids_set]
 
+        for uid in stale_uids:
+            self._log_handles.discard_user(uid)
+
+        # Resume saved attachments before any directory scan or multi-megabyte
+        # cold-tail seed. The full import below still validates cursor offsets,
+        # partial lines, generation revisions and deduplication state.
+        restored = set()
+        validated = {}
+        resume_reasons = {'missing_cursor': 0, 'username_changed_or_missing': 0,
+                          'validation_failed': 0}
+        if isinstance(resume_state, dict) and resume_state.get('version') == 2:
+            cursors = resume_state.get('cursors') or {}
+            if isinstance(cursors, dict):
+                pending = {}
+                for uid in sorted(resolve_uids):
+                    raw = cursors.get(uid)
+                    if not isinstance(raw, dict) or uid in self._cur:
+                        resume_reasons['missing_cursor'] += 1
+                        continue
+                    username = str(self._get_username(uid) or '').strip().lower()
+                    if username != str(raw.get('username') or '').strip().lower():
+                        resume_reasons['username_changed_or_missing'] += 1
+                        continue
+                    pending[uid] = self._tail_executor.submit(self._log_index.restore_match,
+                        username, raw.get('path'), generation_id=raw.get('generation_id'),
+                        position=raw.get('pos'), anchor_size=raw.get('anchor_size'),
+                        anchor_sha256=raw.get('anchor_sha256'),
+                    )
+                # File validation runs on the existing bounded I/O pool. Apply
+                # the results on the owner thread before any tail jobs start.
+                for uid, future in pending.items():
+                    try:
+                        match = future.result()
+                    except Exception:
+                        match = None
+                    if match is None:
+                        resume_reasons['validation_failed'] += 1
+                        continue
+                    self._cur[uid] = Cursor(path=match.path, pos=int(match.size), carry=b'',
+                                            generation_id=match.generation_id,
+                                            session_started_at=match.session_started_at,
+                                            observed_size=int(match.size))
+                    self._ever_attached_uids.add(uid)
+                    restored.add(uid)
+                    validated[uid] = match
+        discovery_uids = resolve_uids-restored
+        if discovery_uids:
+            with self._timings.measure('reader_discovery'):
+                self._log_index.poll(force=True)
         # Do resolves + watcher setup without holding the engine lock
-        for uid in user_ids_set:
-            self._resolve_current_log(uid, force=True, refresh_index=False)
-            cur = self._cur.get(uid)
-            if cur and cur.path:
-                self._log_index.mark_dirty(cur.path)
+        if discovery_uids:
+            with self._timings.measure('reader_resolve'):
+                warmstart_jobs = []
+                for uid in sorted(discovery_uids):
+                    self._resolve_current_log(uid, force=True, refresh_index=False,
+                                              _warmstart_jobs=warmstart_jobs)
+                    cur = self._cur.get(uid)
+                    if cur and cur.path:
+                        self._log_index.mark_dirty(cur.path)
+                self._warmstart_users(warmstart_jobs)
 
         # A tracked account should be visible even before a log is resolved or
         # the first GUI status tick supplies its final server label.
@@ -1384,7 +1263,34 @@ class MultiScopeEngine:
                     scope.users.discard(uid_s)
                     scope.in_menu_by_uid.pop(uid_s, None)
                     scope.last_menu_ts_by_uid.pop(uid_s, None)
+                self._recompute_scope_menu(scope)
             self._sync_user_scope_memberships(user_ids_set)
+            for key, scope in list(self._scopes.items()):
+                if not scope.users:
+                    self._scopes.pop(key, None)
+            self._prune_scope_caches()
+        if isinstance(resume_state, dict) and user_ids_set:
+            self.import_state(resume_state, _validated_cursors=validated)
+            self._resume_diagnostics = dict(restored=len(restored), discovery=len(discovery_uids),
+                                            **resume_reasons)
+            self._log(f'[MultiScope] Restored {len(restored)} saved log attachments; '
+                      f'{len(discovery_uids)} require discovery. '
+                      f'Missing cursors: {resume_reasons["missing_cursor"]}; '
+                      f'username unavailable/changed: {resume_reasons["username_changed_or_missing"]}; '
+                      f'validation failed: {resume_reasons["validation_failed"]}.')
+
+    def _prune_scope_caches(self) -> None:
+        """Called between tail batches, after retiring empty server scopes."""
+        live_keys = set(self._scopes)
+        with self._event_claim_lock:
+            for mapping in (self._last_biome_post_by_scope, self._last_merchant_ts_by_scope, self._last_event_ts_by_scope):
+                for key in list(mapping):
+                    if key not in live_keys:
+                        mapping.pop(key, None)
+        with self._tail_scope_locks_lock:
+            for key in list(self._tail_scope_locks):
+                if key not in live_keys:
+                    self._tail_scope_locks.pop(key, None)
 
     def _retire_generation(self, uid: str, generation_id: str) -> None:
         generation = str(generation_id or "")
@@ -1398,7 +1304,9 @@ class MultiScopeEngine:
 
     def _drop_user_log_tracking(self, uid: str) -> None:
         uid_s = str(uid)
+        self._bes_event_holds.release(uid_s)
         cur = self._cur.pop(uid_s, None)
+        self._log_handles.discard_user(uid_s)
 
         try:
             if cur and cur.generation_id:
@@ -1413,6 +1321,7 @@ class MultiScopeEngine:
         *,
         force: bool = False,
         refresh_index: bool = True,
+        _warmstart_jobs: Optional[list] = None,
     ) -> None:
         uid = str(uid)
         if uid in self._log_resolution_suspended_uids:
@@ -1442,6 +1351,7 @@ class MultiScopeEngine:
                 self._log_index.unpin(cur.generation_id)
                 self._retire_generation(uid, cur.generation_id)
                 self._cur.pop(uid, None)
+                self._log_handles.discard_user(uid)
                 self._mark_menu_unknown(uid)
                 return
             if (
@@ -1453,6 +1363,7 @@ class MultiScopeEngine:
                     self._log_index.unpin(cur.generation_id)
                     self._retire_generation(uid, cur.generation_id)
                 self._cur.pop(uid, None)
+                self._log_handles.discard_user(uid)
                 self._mark_menu_unknown(uid)
             return
         if match.generation_id in self._retired_generations_by_uid.get(uid, set()):
@@ -1465,6 +1376,7 @@ class MultiScopeEngine:
             cur.observed_size = int(match.size)
             return
         cold_attach = uid not in self._ever_attached_uids
+        self._log_handles.discard_user(uid)
         if cur and cur.generation_id:
             self._log_index.unpin(cur.generation_id)
             self._retire_generation(uid, cur.generation_id)
@@ -1483,9 +1395,23 @@ class MultiScopeEngine:
         self._log_index.mark_dirty(match.path)
         self._log(f"[MultiScope] switched log for {uname} - {os.path.basename(match.path)}")
         if cold_attach:
-            self._warmstart_user_tail(uid)
+            if _warmstart_jobs is None:
+                self._warmstart_user_tail(uid)
+            else:
+                _warmstart_jobs.append(uid)
 
-    def _warmstart_user_tail(self, uid: str) -> None:
+    def _warmstart_users(self, user_ids: list) -> None:
+        # Old/cursorless transfers still need a cold state seed. Bound decoded
+        # tails to eight at a time; shared scope state stays on the owner thread.
+        for start in range(0, len(user_ids), 8):
+            pending = [(uid, self._tail_executor.submit(self._read_warmstart_tail, uid))
+                       for uid in user_ids[start:start+8]]
+            for uid, future in pending:
+                prepared = future.result()
+                if prepared is not None:
+                    self._warmstart_user_tail(uid, _prepared=prepared)
+
+    def _read_warmstart_tail(self, uid: str):
         cur = self._cur.get(uid)
         if not cur or not cur.path or not os.path.isfile(cur.path):
             return
@@ -1493,16 +1419,11 @@ class MultiScopeEngine:
             size_now = os.path.getsize(cur.path)
             with open(cur.path, "rb") as f:
                 window = 8 * 1024 * 1024
-                block_size = 256 * 1024
                 base_offset = max(0, int(size_now - window))
-                blocks: list[bytes] = []
-                read_at = int(size_now)
-                while read_at > base_offset:
-                    take = min(block_size, read_at - base_offset)
-                    read_at -= take
-                    f.seek(read_at)
-                    blocks.append(f.read(take))
-                raw = b"".join(reversed(blocks))
+                f.seek(base_offset)
+                raw = f.read(int(size_now)-base_offset)
+            if len(raw) == int(size_now) - base_offset:
+                cur.remember_read(raw, base_offset)
             if base_offset and b"\n" in raw:
                 skipped = raw.find(b"\n") + 1
                 base_offset += skipped
@@ -1510,6 +1431,18 @@ class MultiScopeEngine:
             chunk = raw.decode("utf-8", errors="replace")
         except Exception:
             return
+        return cur, size_now, chunk
+
+    def _warmstart_user_tail(self, uid: str, *, _prepared=None) -> None:
+        prepared = _prepared if _prepared is not None else self._read_warmstart_tail(uid)
+        if prepared is None:
+            return
+        cur, size_now, chunk = prepared
+        if self._cur.get(uid) is not cur:
+            return
+        if self._development_runtime:
+            for line in chunk.splitlines():
+                self._development_runtime.observe(uid, line, path=cur.path, generation_id=cur.generation_id)
         # Cold attachment is a state seed only: never replay historical disconnects.
         disconnect_hit = False
 
@@ -1528,6 +1461,15 @@ class MultiScopeEngine:
                     if not name:
                         continue
                     self._last_merchant_ts_by_scope[scope_key][name] = ts.timestamp()
+
+        for match in iter_event_matches(chunk):
+            try:
+                event_ts = datetime.fromisoformat(match["timestamp"].replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            scope_events = self._last_event_ts_by_scope.setdefault(self._server_key_for(uid), {})
+            event_id = match["event_id"]
+            scope_events[event_id] = max(scope_events.get(event_id, 0.0), event_ts)
 
         # mark this user as warmstarted so its first live read doesn't post old lines
         self._first_merchant_scan_done.add(uid)
@@ -1566,15 +1508,6 @@ class MultiScopeEngine:
                 scope.last_menu_ts = float(latest_menu_ts)
                 scope.in_menu_by_uid[str(uid)] = latest_state
                 scope.last_menu_ts_by_uid[str(uid)] = float(scope.last_menu_ts or 0.0)
-                try:
-                    self._log(f"[SCAN-TRACE] {uid}: warmstart in_menu={latest_state} menu_ts={scope.last_menu_ts:.3f} server={key}")
-                except Exception:
-                    pass
-            else:
-                try:
-                    self._log(f"[SCAN-TRACE] {uid}: warmstart no timestamped in_menu found rpc={len(rpc_entries)}")
-                except Exception:
-                    pass
         cur.pos = int(size_now)
         cur.carry = b""
 
@@ -1675,6 +1608,7 @@ class MultiScopeEngine:
         uid_s = str(uid or "").strip()
         if not uid_s:
             return False
+        self._tracked_uids.add(uid_s)
 
         # Recovery can run over RPC before the next status tick arrives. Seed
         # the new PID time immediately so its warmstart cannot act on a
@@ -1910,7 +1844,7 @@ class MultiScopeEngine:
 
     def _server_key_for(self, uid: str) -> str:
         label = (self._get_server_label(uid) or "").strip()
-        if not label:
+        if not label or label.upper() == "UNKNOWN":
             return f"Unknown #{uid}"
         upper = label.upper()
         if upper.startswith("DISCONNECTED") or upper.startswith("OFFLINE"):
@@ -1972,6 +1906,11 @@ class MultiScopeEngine:
                     float(target_merchants.get(str(merchant), 0.0) or 0.0),
                     float(event_ts or 0.0),
                 )
+
+        source_events = self._last_event_ts_by_scope.pop(source_key, {})
+        target_events = self._last_event_ts_by_scope.setdefault(target_key, {})
+        for event_id, event_ts in source_events.items():
+            target_events[event_id] = max(target_events.get(event_id, 0.0), event_ts)
 
         target.events += int(source.events or 0)
         source.events = 0
@@ -2047,6 +1986,7 @@ class MultiScopeEngine:
             if scope is not None and not scope.users and self._is_unresolved_scope_key(key):
                 self._last_biome_post_by_scope.pop(key, None)
                 self._last_merchant_ts_by_scope.pop(key, None)
+                self._last_event_ts_by_scope.pop(key, None)
                 self._scopes.pop(key, None)
 
     def _should_skip_webhook(self, owner_raw: str, server_label: str, ps_link: str) -> bool:
@@ -2060,25 +2000,19 @@ class MultiScopeEngine:
             return True
         return False
 
-    def _maybe_start_temp_block(self, uid: str, reason: str):
-        if self._temp_block_disabled:
-            return
+    def configure_development(self, config: dict) -> None:
+        runtime = self._development_runtime
+        if runtime:
+            runtime.configure(config)
 
-        now = time.time()
-        exp = self._temp_block_sessions.get(uid, 0)
-        if exp > now:
-            return  # already running recently
+    def configure_bes_event_holds(self, config: dict) -> None:
+        self._bes_event_holds.configure(config)
 
-        username = (self._get_username(uid) or "").strip()
-        cookie = (self._get_cookie_for_user(uid) or "").strip()
-        if not username or not cookie:
-            return
-
-        self._log(f"[TempBlock] starting for {uid} ({username}) due to {reason}")
-        t = _TempBlockSession(self._log, uid, username, cookie)
-        t.start()
-        # Gate re-entrancy slightly beyond the window (3min + 30s pad)
-        self._temp_block_sessions[uid] = now + (_TempBlockSession.WINDOW_SEC + 30)
+    def _event_window_trigger(self, uid: str, trigger: str, event_ts: float) -> None:
+        self._bes_event_holds.trigger(uid, trigger, event_ts)
+        runtime = self._development_runtime
+        if runtime:
+            runtime.trigger(uid, trigger, event_ts)
 
     # -- Embeds ----------------------------------------------------------------
 
@@ -2138,16 +2072,23 @@ class MultiScopeEngine:
             if os.environ.get(_ACCESS_ENV_NAME, "").strip() == "1":
                 return True
 
-            candidates = [Path(_ACCESS_MARKER_NAME)]
+            candidates = [
+                Path(_ACCESS_MARKER_NAME),
+                Path(_DEV_ONLY_PACKAGE) / _ACCESS_MARKER_NAME,
+            ]
             try:
-                candidates.append(Path(__file__).resolve().with_name(_ACCESS_MARKER_NAME))
+                source_dir = Path(__file__).resolve().parent
+                candidates.append(source_dir / _ACCESS_MARKER_NAME)
+                candidates.append(source_dir / _DEV_ONLY_PACKAGE / _ACCESS_MARKER_NAME)
             except Exception:
                 pass
             try:
                 import sys as _sys
                 meipass = getattr(_sys, "_MEIPASS", None)
                 if meipass:
-                    candidates.append(Path(meipass) / _ACCESS_MARKER_NAME)
+                    bundle_dir = Path(meipass)
+                    candidates.append(bundle_dir / _ACCESS_MARKER_NAME)
+                    candidates.append(bundle_dir / _DEV_ONLY_PACKAGE / _ACCESS_MARKER_NAME)
             except Exception:
                 pass
 
@@ -2230,12 +2171,10 @@ class MultiScopeEngine:
             "description": listing,
             "footer": {"text": f"Server: {server_label} | {len(names)} player(s)"},
         }
-        try:
-            self._send_executor.submit(_post_webhook, url, {"content": "", "embeds": [embed]})
-        except Exception:
-            pass
+        self._queue_webhook(url, {"content": "", "embeds": [embed]}, "Player tracker")
 
     def _emit_biome_event(self, uid: str, server_key: str, biome: str, *, event_type: str, ts_epoch: Optional[float] = None) -> None:
+        detected_mono = self._note_detection(ts_epoch if event_type == 'start' else None)
         detector     = self._get_username(uid) or uid
         server_label = self._display_server_label(server_key)
         owner_raw    = (self._get_owner(uid) or "").strip()
@@ -2349,29 +2288,62 @@ class MultiScopeEngine:
                         content = f"<@&{role_id}>"
             payload = {"content": content, "embeds": [embed]}
             attempts = PRIORITY_WEBHOOK_ATTEMPTS if b in HARD_EVERYONE_BIOMES else NORMAL_WEBHOOK_ATTEMPTS
-            try:
-                self._send_executor.submit(
-                    _post_webhook, url, payload,
-                    attempts=attempts,
-                    on_fail=self._on_webhook_failed,
-                    label=f"{b} biome webhook",
-                )
-            except Exception:
-                pass
-            posted_any = True
+            if self._queue_webhook(url, payload, f"{b} biome webhook", detected_mono=detected_mono,
+                                   attempts=attempts, alert=True):
+                posted_any = True
 
         if posted_any:
             self._log(
-                f"[MultiScope] BIOME {event_type.upper()} posted | biome={b} | server={server_key} | "
+                f"[MultiScope] BIOME {event_type.upper()} queued | biome={b} | server={server_key} | "
                 f"by={detector} | ts={int(ts_epoch) if ts_epoch else '-'}"
             )
         if posted_any:
             scope.events += 1
 
 
+    def _note_detection(self, source_epoch=None) -> float:
+        began = time.monotonic()
+        if source_epoch is not None:
+            try:
+                self._timings.record('source_to_detection', (time.time()-float(source_epoch))*1000)
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return began
+
+    def _queue_webhook(self, url: str, payload: dict, label: str, *, detected_mono=None,
+                       attempts: int = 1, alert: bool = False) -> bool:
+        """Queue one post. alert=True also tells the GUI (throttled) when it finally fails."""
+        queued_mono = time.monotonic()
+        try:
+            future = self._send_executor.submit(
+                _post_webhook, url, payload, attempts=attempts,
+                on_fail=self._on_webhook_failed if alert else
+                (lambda lbl, status: self._log(f"[Webhook] {lbl}: {status}.")),
+                label=label,
+            )
+        except Exception:
+            self._log(f"[Webhook] {label}: could not queue delivery.")
+            return False
+        if future is None:
+            return False
+        if detected_mono is not None:
+            self._timings.record('detection_to_queue', (queued_mono-detected_mono)*1000)
+
+        def completed(result):
+            if result.cancelled() or result.exception() is not None or not result.result():
+                return
+            now = time.monotonic()
+            self._timings.record('queue_to_ack', (now-queued_mono)*1000)
+            if detected_mono is not None:
+                self._timings.record('detection_to_ack', (now-detected_mono)*1000)
+
+        future.add_done_callback(completed)
+        return True
+
     def _emit_merchant(self, uid: str, who: str, event_time_utc: datetime, full_line: str) -> None:
         if self._disable_log_based_merchant_detection:
             return
+        detected_mono = self._note_detection(event_time_utc.timestamp())
         try:
             self._record_found_merchant(who, ts_epoch=event_time_utc.timestamp())
         except Exception:
@@ -2386,10 +2358,9 @@ class MultiScopeEngine:
             scope.last_merchant_ts = time.time()
         scope.users.add(uid)
         self._emit_event("merchant", str(uid), str(who))
+        self._event_window_trigger(str(uid), f"Merchant:{who}", event_time_utc.timestamp())
 
-        # Sinister S. (boss) has its own webhook; blank = the merchant webhook.
-        hook = (self._sinister_hook if who == "Sinister S." else "") or self._merchant_hook
-        if not hook:
+        if not self._merchant_hook:
             return
         if not self._merchant_filters.get(who, True):
             return
@@ -2401,8 +2372,8 @@ class MultiScopeEngine:
         if self._should_skip_webhook(owner_raw, server_label, ps_link):
             return
 
-        emojis = {"Jester": "🃏", "Mari": "🛍️", "Rin": "🦊", "Sinister S.": "💀"}
-        colors = {"Jester": 0xA352FF, "Mari": 0xFF82AB, "Rin": 0xFF9F1C, "Sinister S.": 0x8B0000}
+        emojis = {"Jester": "🃏", "Mari": "🛍️", "Rin": "🦊"}
+        colors = {"Jester": 0xA352FF, "Mari": 0xFF82AB, "Rin": 0xFF9F1C}
         title  = f"{emojis.get(who,'📣')} {who} Has Arrived!"
         ts     = int(event_time_utc.timestamp())
         ts_full = f"<t:{ts}:D> • <t:{ts}:T>"
@@ -2423,15 +2394,28 @@ class MultiScopeEngine:
             "footer": {"text": f"{APP_FOOTER}  •  {server_label}"}
         }]}
 
-        try:
-            self._send_executor.submit(_post_webhook, hook, payload)
-        except Exception:
-            pass
-        # START TEMP BLOCK WINDOW for Jester
-        if who == "Jester":
-            self._maybe_start_temp_block(uid, "Jester")
+        if self._queue_webhook(self._merchant_hook, payload, f"Merchant {who}", detected_mono=detected_mono):
+            scope.events += 1
 
-        scope.events += 1
+    def _emit_game_event(self, uid: str, event_id: str, detected_at: datetime) -> None:
+        detected_mono = self._note_detection(detected_at.timestamp())
+        scope_key = self._server_key_for(uid)
+        scope = self._scopes.setdefault(scope_key, ServerScope(scope_key))
+        scope.users.add(uid)
+        server_label = self._display_server_label(scope_key)
+        detector = self._get_username(uid) or uid
+        owner_raw = (self._get_owner(uid) or "").strip()
+        ps_link = self._get_ps_link(uid) or ""
+        if self._should_skip_webhook(owner_raw, server_label, ps_link):
+            return
+        for url, content in event_webhook_targets(self._event_webhooks, event_id):
+            payload = build_event_payload(
+                event_id, owner=owner_raw or detector, detector=detector,
+                server_label=server_label, ps_link=ps_link, detected_at=detected_at,
+                footer=APP_FOOTER, content=content,
+            )
+            if self._queue_webhook(url, payload, f"Event {EVENTS[event_id]['name']}", detected_mono=detected_mono):
+                scope.events += 1
 
     def record_ocr_merchant(self, uid: str, merchant: str) -> None:
         """
@@ -2471,6 +2455,7 @@ class MultiScopeEngine:
             except Exception:
                 pass
             self._emit_event("merchant", uid, who)
+            self._event_window_trigger(uid, f"Merchant:{who}", now_ts)
 
     def _dispatch_log_line(
         self,
@@ -2486,31 +2471,37 @@ class MultiScopeEngine:
         lower = line.lower()
         needs_scope_order = bool(
             "[BloxstrapRPC]" in line
+            or any(token in lower for token in EVENT_ASSET_PREFILTERS)
             or "disconnect" in lower
             or "connection lost" in lower
             or (self._player_tracker_hook and "humanoid.clothes:" in lower)
             or any(token in lower for token in MERCHANT_ASSET_PREFILTERS)
         )
-        if needs_scope_order:
-            with self._tail_scope_lock_for(uid):
-                return self._dispatch_log_line_serial(
-                    uid,
-                    line,
-                    path=path,
-                    generation_id=generation_id,
-                    byte_start=byte_start,
-                    byte_end=byte_end,
-                    disconnect_already=disconnect_already,
-                )
-        return self._dispatch_log_line_serial(
-            uid,
-            line,
-            path=path,
-            generation_id=generation_id,
-            byte_start=byte_start,
-            byte_end=byte_end,
-            disconnect_already=disconnect_already,
-        )
+        if not needs_scope_order:
+            # Most Roblox output is unrelated to detection. Preserve consumers
+            # and cursor timestamps without running event parsers or rebuilding
+            # server membership for each warning/stack-trace line.
+            runtime = self._development_runtime
+            if runtime:
+                runtime.observe(uid, line, path=path, generation_id=generation_id)
+            cur = self._cur.get(uid)
+            if cur is not None:
+                ts_match = _LOG_TS_RE.search(line)
+                if ts_match:
+                    ts_epoch = _parse_log_ts_epoch(ts_match.group(0))
+                    if ts_epoch is not None:
+                        cur.last_event_ts = max(float(cur.last_event_ts or 0.0), ts_epoch)
+            return bool(disconnect_already)
+        with self._timings.wait_for(self._tail_scope_lock_for(uid), 'reader_scope_lock_wait'):
+            return self._dispatch_log_line_serial(
+                uid,
+                line,
+                path=path,
+                generation_id=generation_id,
+                byte_start=byte_start,
+                byte_end=byte_end,
+                disconnect_already=disconnect_already,
+            )
 
     def _dispatch_log_line_serial(
         self,
@@ -2524,6 +2515,9 @@ class MultiScopeEngine:
         disconnect_already: bool = False,
     ) -> bool:
         """Parse one logical line and dispatch each supported record once."""
+        runtime = self._development_runtime
+        if runtime:
+            runtime.observe(uid, line, path=path, generation_id=generation_id)
         ts_epoch: Optional[float] = None
         ts_match = _LOG_TS_RE.search(line)
         if ts_match:
@@ -2565,12 +2559,28 @@ class MultiScopeEngine:
                     byte_end,
                     f"merchant:{who.lower()}",
                 )
-                if claimed and not self._scope_dedupe_merchant_ts(
-                    scope_key, who, float(ts_epoch),
-                    window=SINISTER_DEDUPE_WINDOW_S if who == "Sinister S." else 10.0,
-                ):
+                if claimed and not self._scope_dedupe_merchant_ts(scope_key, who, float(ts_epoch), window=10.0):
                     self._emit_merchant(uid, who, event_dt, str(match.get("full_line") or ""))
             self._first_merchant_scan_done.add(uid)
+
+        if ts_epoch is not None and any(token in lower for token in EVENT_ASSET_PREFILTERS):
+            scope_key = self._server_key_for(uid)
+            for match in iter_event_matches(line.rstrip("\r\n")):
+                event_id = match["event_id"]
+                if event_id in self._disabled_log_events:
+                    continue
+                with self._event_claim_lock:
+                    timestamps = self._last_event_ts_by_scope.setdefault(scope_key, {})
+                    last = timestamps.get(event_id)
+                    if uid not in self._first_merchant_scan_done:
+                        timestamps[event_id] = max(last or 0.0, float(ts_epoch))
+                        continue
+                    if last is not None and ts_epoch < last + EVENTS[event_id]["cooldown_seconds"]:
+                        continue
+                    if not self._claim_event_range(generation_id, byte_start, byte_end, f"event:{event_id}"):
+                        continue
+                    timestamps[event_id] = float(ts_epoch)
+                self._emit_game_event(uid, event_id, datetime.fromtimestamp(ts_epoch, tz=timezone.utc))
 
         if "[BloxstrapRPC]" in line:
             rpc_entries = _extract_rpc_entries_from_text(
@@ -2587,6 +2597,8 @@ class MultiScopeEngine:
                 event_ts = float(event_ts)
                 menu_state = _extract_in_menu_from_rpc(rpc)
                 if menu_state is not None and not disconnect_hit:
+                    previous_menu_state = scope.in_menu_by_uid.get(str(uid))
+                    previous_menu_ts = float(scope.last_menu_ts_by_uid.get(str(uid), 0.0) or 0.0)
                     claimed = self._claim_event_range(
                         generation_id,
                         byte_start,
@@ -2601,6 +2613,15 @@ class MultiScopeEngine:
                     scope.in_menu_by_uid[str(uid)] = menu_state
                     scope.last_menu_ts_by_uid[str(uid)] = event_ts
                     self._clear_menu_unknown(uid)
+                    if (
+                        menu_state is False
+                        and previous_menu_state is not False
+                        and event_ts >= previous_menu_ts
+                        and self._claim_event_range(
+                            generation_id, byte_start, byte_end, f"rpc:menu_exit:{uid}"
+                        )
+                    ):
+                        self._emit_event("menu_exit", uid, str(event_ts))
 
                 biome_name = _extract_biome_from_rpc(rpc)
                 if not biome_name:
@@ -2633,10 +2654,9 @@ class MultiScopeEngine:
                 scope.last_biome = biome
                 scope.last_biome_ts = event_ts
                 self._last_biome_post_by_scope[server_key] = event_ts
+                self._event_window_trigger(uid, f"Biome:{biome}", event_ts)
                 if biome != "NORMAL":
                     self._emit_biome_event(uid, server_key, biome, event_type="start", ts_epoch=event_ts)
-                    if biome in HARD_EVERYONE_BIOMES:
-                        self._maybe_start_temp_block(uid, f"Biome:{biome}")
                 else:
                     self._log(
                         f"[MultiScope] BIOME START suppressed | biome=NORMAL | "
@@ -2653,7 +2673,7 @@ class MultiScopeEngine:
         cur = self._cur.get(uid)
         if cur is not None and ts_epoch is not None:
             cur.last_event_ts = max(float(cur.last_event_ts or 0.0), float(ts_epoch))
-        with self._tail_scope_lock_for(uid):
+        with self._timings.wait_for(self._tail_scope_lock_for(uid), 'reader_scope_lock_wait'):
             self._scope(self._server_key_for(uid)).users.add(uid)
         return disconnect_hit
 
@@ -2674,21 +2694,96 @@ class MultiScopeEngine:
     def _tail_one(self, uid: str, *, max_bytes: Optional[int] = None) -> int:
         return self._tail_one_serial(uid, max_bytes=max_bytes)
 
+    def _open_tail_handle(self, path):
+        with self._timings.measure('reader_file_open'):
+            return open_shared_log(path)
+
+    def _close_tail_handle(self, handle):
+        with self._timings.measure('reader_file_close'):
+            handle.close()
+
+    def _run_tail_job(self, uid: str, *, max_bytes: int, submitted_at: float) -> int:
+        self._timings.record('reader_tail_queue_wait', (time.monotonic()-submitted_at)*1000)
+        return self._tail_one(uid, max_bytes=max_bytes)
+
+    def _dispatch_complete_log_block(
+        self, uid: str, cur: Cursor, complete: bytes, base_offset: int,
+    ) -> Optional[Tuple[bool, int]]:
+        """Dispatch candidate lines while preserving byte ranges and timestamp state."""
+        if len(complete) > self._max_line_bytes or (
+            b"\r" in complete and _STANDALONE_CR_RE.search(complete)
+        ):
+            return None
+        markers = _CORE_LOG_LINE_MARKERS
+        runtime = self._development_runtime
+        if runtime is not None:
+            provider = getattr(runtime, "log_line_markers", None)
+            if not callable(provider):
+                return None
+            try:
+                extra = provider()
+            except Exception:
+                return None
+            if not isinstance(extra, tuple) or any(
+                not isinstance(marker, bytes) or not marker or not marker.isascii()
+                or b"\n" in marker or b"\r" in marker for marker in extra
+            ):
+                return None
+            markers += extra
+        try:
+            text = complete.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return None
+
+        lower = complete.lower()
+        spans: Dict[int, int] = {}
+        for marker in set(marker.lower() for marker in markers):
+            found = lower.find(marker)
+            while found >= 0:
+                begin = complete.rfind(b"\n", 0, found) + 1
+                end = complete.find(b"\n", found) + 1
+                spans[begin] = end
+                found = lower.find(marker, end)
+        disconnect_hit = False
+        for begin, end in sorted(spans.items()):
+            disconnect_hit = self._dispatch_log_line(
+                uid, complete[begin:end].decode("utf-8"), path=cur.path,
+                generation_id=cur.generation_id,
+                byte_start=base_offset + begin, byte_end=base_offset + end,
+                disconnect_already=disconnect_hit,
+            )
+        if self._cur.get(uid) is cur:
+            timestamp = _latest_complete_line_timestamp(text)
+            if timestamp is not None:
+                cur.last_event_ts = max(float(cur.last_event_ts or 0.0), timestamp)
+        return disconnect_hit, complete.count(b"\n")
+
     def _tail_one_serial(self, uid: str, *, max_bytes: Optional[int] = None) -> int:
         cur = self._cur.get(uid)
-        if not cur or not cur.path or not os.path.isfile(cur.path):
+        with self._timings.measure('reader_metadata'):
+            missing = not cur or not cur.path or not os.path.isfile(cur.path)
+        if missing:
+            self._log_handles.discard_user(uid)
             self._resolve_current_log(uid, force=True)
             cur = self._cur.get(uid)
-            if not cur or not cur.path or not os.path.isfile(cur.path):
+            with self._timings.measure('reader_metadata'):
+                missing = not cur or not cur.path or not os.path.isfile(cur.path)
+            if missing:
                 return 0
 
         disconnect_hit = False
         try:
             start_pos = int(cur.pos or 0)
-            size_now = os.path.getsize(cur.path)
+            with self._timings.measure('reader_metadata'):
+                path_stat = os.stat(cur.path)
+                size_now = path_stat.st_size
             cur.observed_size = int(size_now)
             if size_now < start_pos:
+                self._log_handles.discard_user(uid)
                 self._reader_stat_add("truncations")
+                # The cursor may be ahead of the index's last metadata sample.
+                # Force a revision even if the new size exceeds that old sample.
+                self._log_index.invalidate_generation(cur.path)
                 self._log_index.mark_dirty(cur.path)
                 self._log_index.refresh(force=True)
                 self._resolve_current_log(uid, force=True)
@@ -2697,16 +2792,43 @@ class MultiScopeEngine:
                 return 0
             limit = self._per_read_cap if max_bytes is None else max(1, int(max_bytes))
             to_read = min(self._per_read_cap, limit, size_now - start_pos)
-            with open(cur.path, "rb") as f:
-                f.seek(start_pos)
-                raw = f.read(to_read)
+            with self._timings.measure('reader_file_read'):
+                key = (str(uid), cur.generation_id, os.path.normcase(os.path.abspath(cur.path)))
+                with self._log_handles.borrow(key, lambda: self._open_tail_handle(cur.path)) as f:
+                    with self._timings.measure('reader_metadata'):
+                        opened_stat = os.fstat(f.fileno())
+                        path_identity = RobloxLogIndex._identity(path_stat)
+                        opened_identity = RobloxLogIndex._identity(opened_stat)
+                        saved_identity = str(cur.generation_id).rpartition('|')[2].rpartition(':')[0]
+                        identity_text = ':'.join(str(part) for part in path_identity)
+                        if opened_identity == path_identity and opened_stat.st_size < start_pos:
+                            self._log_index.invalidate_generation(cur.path)
+                        if (opened_identity != path_identity or opened_stat.st_size < start_pos
+                                or ('|' in cur.generation_id and saved_identity != identity_text)):
+                            raise _StaleLogHandle()
+                    with self._timings.measure('reader_file_seek'):
+                        f.seek(start_pos)
+                    with self._timings.measure('reader_file_read_call'):
+                        raw = f.read(to_read)
             if not raw:
                 return 0
             cur.pos = start_pos + len(raw)
+            cur.remember_read(raw, start_pos)
+        except _StaleLogHandle:
+            self._log_handles.discard_user(uid)
+            self._log_index.mark_dirty(cur.path)
+            self._log_index.refresh(force=True)
+            self._resolve_current_log(uid, force=True, refresh_index=False)
+            return 0
         except Exception:
             self._reader_stat_add("read_failures")
             return 0
 
+        with self._timings.measure('reader_parse'):
+            return self._parse_tail_block(uid, cur, raw, start_pos)
+
+    def _parse_tail_block(self, uid: str, cur: Cursor, raw: bytes, start_pos: int) -> int:
+        disconnect_hit = False
         previous_carry = bytes(cur.carry or b"")
         combined = previous_carry + raw
         combined_base = max(0, start_pos - len(previous_carry))
@@ -2730,10 +2852,11 @@ class MultiScopeEngine:
             cur.dropping_oversized = True
             self._reader_stat_add("oversized_lines")
 
-        line_parts: list[str] = []
+        lines_read = 0
         line_offset = int(combined_base)
-        disconnect_hit = False
-        for line_bytes in complete.splitlines(keepends=True):
+        dispatched = self._dispatch_complete_log_block(uid, cur, complete, line_offset)
+        disconnect_hit, lines_read = dispatched if dispatched is not None else (False, 0)
+        for line_bytes in (() if dispatched is not None else complete.splitlines(keepends=True)):
             line_end = line_offset + len(line_bytes)
             if len(line_bytes) > self._max_line_bytes:
                 self._reader_stat_add("oversized_lines")
@@ -2744,7 +2867,7 @@ class MultiScopeEngine:
             except UnicodeDecodeError:
                 line_text = line_bytes.decode("utf-8", errors="replace")
                 self._reader_stat_add("decode_errors")
-            line_parts.append(line_text)
+            lines_read += 1
             disconnect_hit = self._dispatch_log_line(
                 uid,
                 line_text,
@@ -2769,12 +2892,14 @@ class MultiScopeEngine:
                 or R_DISC_SENDING.search(tail_text)
                 or R_CONN_LOST.search(tail_text)
                 or _iter_merchant_matches(tail_text)
+                or iter_event_matches(tail_text)
                 or _extract_rpc_entries_from_text(tail_text)
+                or (self._development_runtime and self._development_runtime.complete_record(tail_text))
             )
             if tail_is_complete:
                 tail_start = int(cur.pos) - len(cur.carry)
                 tail_end = int(cur.pos)
-                line_parts.append(tail_text)
+                lines_read += 1
                 disconnect_hit = self._dispatch_log_line(
                     uid,
                     tail_text,
@@ -2787,15 +2912,28 @@ class MultiScopeEngine:
                 cur.carry = b""
 
         self._reader_stat_add("bytes_read", len(raw))
-        self._reader_stat_add("lines_read", len(line_parts))
+        self._reader_stat_add("lines_read", lines_read)
         return len(raw)
 
 
 
     def poll_logs(self) -> dict:
         """Advance discovery and tail eligible cursors with bounded concurrency."""
-        self._log_index.poll()
-        generation_sizes = self._log_index.generation_sizes()
+        began = time.monotonic()
+        try:
+            result = self._poll_logs_cycle()
+        finally:
+            self._timings.record('reader_cycle', (time.monotonic()-began)*1000)
+        result['timings'] = self._timings.snapshot()
+        return result
+
+    def _poll_logs_cycle(self) -> dict:
+        self._bes_event_holds.tick()
+        with self._stats_lock:
+            self._flush_found_stats_locked()
+        with self._timings.measure('reader_discovery'):
+            self._log_index.poll()
+            generation_sizes = self._log_index.generation_sizes()
         for cur in tuple(self._cur.values()):
             known_size = generation_sizes.get(cur.generation_id)
             if known_size is not None:
@@ -2804,8 +2942,11 @@ class MultiScopeEngine:
         now_mono = time.monotonic()
         if now_mono >= self._next_path_resolve_mono:
             self._next_path_resolve_mono = now_mono + 0.25
-            for uid in sorted(self._tracked_uids):
-                self._resolve_current_log(uid, refresh_index=False)
+            with self._timings.measure('reader_resolve'):
+                warmstart_jobs = []
+                for uid in sorted(self._tracked_uids):
+                    self._resolve_current_log(uid, refresh_index=False, _warmstart_jobs=warmstart_jobs)
+                self._warmstart_users(warmstart_jobs)
 
         uids = sorted(
             uid
@@ -2838,17 +2979,19 @@ class MultiScopeEngine:
         if jobs:
             self._tail_rotation = (start + len(jobs)) % len(uids)
             futures = [
-                self._tail_executor.submit(self._tail_one, uid, max_bytes=max_bytes)
+                self._tail_executor.submit(self._run_tail_job, uid, max_bytes=max_bytes,
+                                           submitted_at=time.monotonic())
                 for uid, max_bytes in jobs
             ]
             # Complete the batch before the process handles state-changing
             # commands. This keeps process ownership deterministic while the
             # expensive per-user file reads/parsers run concurrently.
-            for future in futures:
-                try:
-                    future.result()
-                except Exception:
-                    self._reader_stat_add("read_failures")
+            with self._timings.measure('reader_batch_wait'):
+                for future in futures:
+                    try:
+                        future.result()
+                    except Exception:
+                        self._reader_stat_add("read_failures")
 
         backlog_users = sum(
             1
@@ -2868,7 +3011,20 @@ class MultiScopeEngine:
         out["index"] = self._log_index.diagnostics_snapshot()
         out["tracked_users"] = len(self._tracked_uids)
         out["attached_users"] = len(self._cur)
+        out["tracked_user_ids"] = sorted(self._tracked_uids)
+        out["attached_user_ids"] = sorted(self._cur)
         out["tail_workers"] = int(self._tail_workers)
+        out['resume'] = dict(getattr(self, '_resume_diagnostics', {}))
+        out['handles'] = self._log_handles.diagnostics()
+        out["delivery"] = {**webhook_gate.stats(), "pending": self._send_executor.pending(),
+                           "capacity": self._send_executor.capacity}
+        out['timings'] = self._timings.snapshot()
+        with self._stats_lock:
+            out['statistics'] = dict(dirty=self._stats_dirty, save_failures=self._stats_save_failures,
+                                     last_error_type=self._stats_last_error_type,
+                                     writer_alive=bool(self._stats_writer and self._stats_writer.is_alive()),
+                                     seconds_since_save=max(0.0, time.monotonic()-self._stats_last_saved_mono)
+                                     if self._stats_last_saved_mono else None)
         return out
 
     def diagnostics_snapshot(self) -> dict:
@@ -3069,6 +3225,7 @@ class MultiScopeEngine:
                 quiet = (now_t - max(scope.last_biome_ts, scope.last_merchant_ts, 0)) > 600
                 if not scope.users and quiet:
                     self._scopes.pop(key, None)
+            self._prune_scope_caches()
 
     def export_state(self) -> dict:
         """
@@ -3132,27 +3289,20 @@ class MultiScopeEngine:
                 if known_uids and u not in known_uids:
                     continue
                 try:
-                    stat_now = os.stat(cur.path) if getattr(cur, "path", None) else None
                     cursor_state = {
                         "path": (str(cur.path) if getattr(cur, "path", None) else None),
+                        "username": str(self._get_username(u) or ''),
                         "pos": int(getattr(cur, "pos", 0) or 0),
                         "carry_b64": base64.b64encode(bytes(getattr(cur, "carry", b"") or b"")).decode("ascii"),
                         "generation_id": str(getattr(cur, "generation_id", "") or ""),
                         "session_started_at": float(getattr(cur, "session_started_at", 0.0) or 0.0),
                         "last_event_ts": float(getattr(cur, "last_event_ts", 0.0) or 0.0),
                         "dropping_oversized": bool(getattr(cur, "dropping_oversized", False)),
-                        "size_at_snapshot": int(stat_now.st_size) if stat_now is not None else 0,
-                        "mtime_ns_at_snapshot": int(
-                            getattr(stat_now, "st_mtime_ns", int(stat_now.st_mtime * 1_000_000_000))
-                        ) if stat_now is not None else 0,
+                        "size_at_snapshot": max(int(cur.pos), int(cur.observed_size)),
                     }
-                    try:
-                        anchor_size, anchor_sha256 = _cursor_anchor(cur.path, cursor_state["pos"])
-                        if anchor_size and anchor_sha256:
-                            cursor_state["anchor_size"] = anchor_size
-                            cursor_state["anchor_sha256"] = anchor_sha256
-                    except Exception:
-                        pass
+                    if cur.anchor_pos == cur.pos and cur.anchor_tail:
+                        cursor_state['anchor_size'] = len(cur.anchor_tail)
+                        cursor_state['anchor_sha256'] = hashlib.sha256(cur.anchor_tail).hexdigest()
                     cursors[u] = cursor_state
                 except Exception:
                     continue
@@ -3186,6 +3336,10 @@ class MultiScopeEngine:
             except Exception:
                 out["last_merchant_ts_by_scope"] = {}
             try:
+                out["last_event_ts_by_scope"] = {
+                    str(scope): {str(event_id): float(ts) for event_id, ts in timestamps.items()}
+                    for scope, timestamps in self._last_event_ts_by_scope.items()
+                }
                 out["first_merchant_scan_done"] = [
                     str(u)
                     for u in (self._first_merchant_scan_done or set())
@@ -3209,7 +3363,7 @@ class MultiScopeEngine:
 
         return out
 
-    def import_state(self, state: dict) -> bool:
+    def import_state(self, state: dict, *, _validated_cursors: Optional[Dict[str, LogMatch]] = None) -> bool:
         """
         Restore a previously-exported runtime snapshot.
         Returns True if anything was applied.
@@ -3223,10 +3377,14 @@ class MultiScopeEngine:
         if ver not in {1, 2}:
             return False
 
+        # Handles are process-local and must never survive a cursor import.
+        for uid in self._cur:
+            self._log_handles.discard_user(uid)
+
         applied = False
         with self._lock:
             try:
-                known_uids = set(self._cur.keys())
+                known_uids = set(self._tracked_uids)
             except Exception:
                 known_uids = set()
 
@@ -3335,10 +3493,14 @@ class MultiScopeEngine:
                         continue
 
                     try:
-                        stat_now = os.stat(cur.path) if cur.path else None
-                        size_now = int(stat_now.st_size) if stat_now is not None else 0
-                        if stat_now is None:
-                            continue
+                        validated_match = (_validated_cursors or {}).get(u)
+                        if validated_match is not None:
+                            size_now = int(validated_match.size)
+                        else:
+                            stat_now = os.stat(cur.path) if cur.path else None
+                            size_now = int(stat_now.st_size) if stat_now is not None else 0
+                            if stat_now is None:
+                                continue
                         saved_pos = max(0, int(raw.get("pos", getattr(cur, "pos", 0)) or 0))
                         saved_size = int(raw.get("size_at_snapshot", raw.get("pos", 0)) or 0)
                     except Exception:
@@ -3366,6 +3528,7 @@ class MultiScopeEngine:
                     anchor_size = 0
                     anchor_sha256 = ""
                     anchor_matches = False
+                    anchor_bytes = b''
                     try:
                         anchor_size = max(0, int(raw.get("anchor_size", 0) or 0))
                         anchor_sha256 = str(raw.get("anchor_sha256") or "").strip().lower()
@@ -3377,11 +3540,14 @@ class MultiScopeEngine:
                             and size_now >= saved_pos
                             and anchor_sha256
                         ):
-                            actual_size, actual_sha256 = _cursor_anchor(
-                                cur.path,
-                                saved_pos,
-                                length=anchor_size,
-                            )
+                            if validated_match is not None:
+                                anchor_bytes = validated_match.resume_anchor
+                            else:
+                                with open(cur.path, 'rb') as handle:
+                                    handle.seek(saved_pos-anchor_size)
+                                    anchor_bytes = handle.read(anchor_size)
+                            actual_size = len(anchor_bytes)
+                            actual_sha256 = hashlib.sha256(anchor_bytes).hexdigest()
                             anchor_matches = (
                                 actual_size == anchor_size
                                 and actual_sha256.lower() == anchor_sha256
@@ -3414,6 +3580,8 @@ class MultiScopeEngine:
 
                     if content_continues:
                         cur.pos = saved_pos
+                        cur.anchor_tail = anchor_bytes
+                        cur.anchor_pos = saved_pos
                     elif truncated or not same_path or identity_changed:
                         # A genuinely new generation is intentionally replayed
                         # from its beginning so events written while paused (and
@@ -3421,6 +3589,7 @@ class MultiScopeEngine:
                         cur.pos = 0
                         cur.carry = b""
                         cur.dropping_oversized = False
+                        cur.anchor_tail = b''
                     else:
                         # Ambiguous same-path metadata/content drift must fail
                         # quiet. Replaying an old file is worse than omitting an
@@ -3428,6 +3597,7 @@ class MultiScopeEngine:
                         cur.pos = size_now
                         cur.carry = b""
                         cur.dropping_oversized = False
+                        cur.anchor_tail = b''
                     cur.observed_size = size_now
 
                     try:
@@ -3467,14 +3637,14 @@ class MultiScopeEngine:
 
             # -- Dedupe/throttle caches --------------------------------------
             try:
-                lbp = state.get("last_biome_post_by_scope") or {}
+                lbp = state.get("last_biome_post_by_scope")
                 if isinstance(lbp, dict):
                     self._last_biome_post_by_scope = {str(k): float(v) for k, v in lbp.items()}
                     applied = True
             except Exception:
                 pass
             try:
-                lmt = state.get("last_merchant_ts_by_scope") or {}
+                lmt = state.get("last_merchant_ts_by_scope")
                 if isinstance(lmt, dict):
                     merged: dict = {}
                     for scope, mm in lmt.items():
@@ -3486,7 +3656,13 @@ class MultiScopeEngine:
             except Exception:
                 pass
             try:
-                fms = state.get("first_merchant_scan_done") or []
+                event_timestamps = state.get("last_event_ts_by_scope")
+                if isinstance(event_timestamps, dict):
+                    self._last_event_ts_by_scope = {
+                        str(scope): {str(event_id): float(ts) for event_id, ts in timestamps.items()}
+                        for scope, timestamps in event_timestamps.items() if isinstance(timestamps, dict)
+                    }
+                fms = state.get("first_merchant_scan_done")
                 if isinstance(fms, (list, tuple, set)):
                     self._first_merchant_scan_done = {
                         str(u) for u in fms if not known_uids or str(u) in known_uids
@@ -3515,11 +3691,11 @@ class MultiScopeEngine:
                         self._retired_generations_by_uid = {
                             str(uid): set(sorted(str(g) for g in (generations or []) if str(g))[-8:])
                             for uid, generations in retired.items()
-                            if isinstance(generations, (list, tuple, set))
+                            if isinstance(generations, (list, tuple, set)) and str(uid) in known_uids
                         }
                     ever = state.get("ever_attached_uids") or []
                     if isinstance(ever, (list, tuple, set)):
-                        self._ever_attached_uids.update(str(uid) for uid in ever)
+                        self._ever_attached_uids.update(str(uid) for uid in ever if str(uid) in known_uids)
                     applied = True
                 except Exception:
                     pass
@@ -3605,17 +3781,29 @@ class MultiScopeEngine:
                 tail.shutdown(wait=True, cancel_futures=True)
         except Exception:
             pass
+        handles = getattr(self, '_log_handles', None)
+        if handles is not None:
+            handles.close()
         snd = getattr(self, "_send_executor", None)
         try:
             if snd:
-                snd.shutdown(wait=False)
+                snd.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
-        # temp-block sessions currently auto-expire; no explicit cancel hook yet
+        if self._development_runtime:
+            self._development_runtime.shutdown()
+        self._bes_event_holds.shutdown()
         try:
             with self._stats_lock:
-                self._prune_found_events_locked(now_ts=time.time())
-                self._save_found_stats_locked()
+                if not self._stats_stop.is_set():
+                    self._prune_found_events_locked(now_ts=time.time())
+                    self._save_found_stats_locked()
+                self._stats_stop.set()
+                self._stats_wake.set()
+            if self._stats_writer is not None:
+                self._stats_writer.join(timeout=3.0)
+                if self._stats_writer.is_alive():
+                    self._log("[MultiScope] Statistics writer still busy at shutdown; final save unconfirmed.")
         except Exception:
             pass
 

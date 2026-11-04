@@ -3,7 +3,9 @@
 - Sends to the same webhook are queued one at a time, so threads never burst one bucket.
 - Discord's X-RateLimit-Remaining / Reset-After headers pause that webhook *before* it would 429.
 - A 429 waits exactly retry_after (body or Retry-After) and resends; a global 429 pauses every webhook.
-- 5xx and network errors back off and retry twice.
+- 5xx and network errors back off and retry twice. A read timeout is not resent: Discord may
+  already have posted it, and a resend would ping everyone twice.
+- stats() counts sends for the performance page.
 """
 import math
 import threading
@@ -21,6 +23,27 @@ _global_until = 0.0
 _channel_cache: Dict[str, dict] = {}
 # Set by the app: called (url, retry_after_s, is_global) on every real 429, from its own thread.
 on_rate_limited = None
+_stats = dict(delivered=0, failed=0, retried=0, rate_limited=0, http_attempts=0, waiting=0,
+              last_http_status=None)
+
+
+def _count(**changes: Any) -> None:
+    with _lock:
+        for k, v in changes.items():
+            if k == "last_http_status":
+                _stats[k] = v
+            else:
+                _stats[k] += v
+
+
+def stats() -> dict:
+    """Counters since start, plus how long until the slowest paused webhook may send again."""
+    now = time.monotonic()
+    with _lock:
+        out = dict(_stats)
+        out["global_cooldown_seconds"] = max(0.0, _global_until - now)
+        out["destination_cooldown_seconds"] = max([0.0] + [t - now for t in _blocked_until.values()])
+    return out
 
 
 def channel_info(url: str) -> dict:
@@ -131,12 +154,16 @@ def post(url: str, *, json: Any = None, data: Any = None, files: Any = None, tim
     tries = 0
     limited = 0
     lock = _url_lock(url)
+    _count(waiting=1)
     # Bounded: a caller (e.g. a UI-thread test button) never waits past its budget behind other senders.
     if not lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        _count(waiting=-1, failed=1)
         raise requests.exceptions.RetryError(f"webhook busy for over {max_wait_s:.0f}s")
+    sends = 0
     try:
         while _wait_for(url, deadline):
             _rewind(files)
+            sends += 1
             try:
                 r = requests.post(url, json=json, data=data, files=files, timeout=timeout)
                 error = None
@@ -144,19 +171,26 @@ def post(url: str, *, json: Any = None, data: Any = None, files: Any = None, tim
                 r, error = None, e
             if r is not None:
                 _note(url, r)
+                _count(last_http_status=r.status_code)
                 if r.status_code == 429:
+                    _count(rate_limited=1)
                     limited += 1
                     if limited >= 5 or time.monotonic() >= deadline:
                         break
                     continue                    # _wait_for sleeps exactly retry_after
                 if not 500 <= r.status_code < 600:
                     return r
+            elif isinstance(error, requests.exceptions.ReadTimeout):
+                break                           # may already be posted: never ping twice
             tries += 1
             if tries > int(retries) or time.monotonic() + 2.0 * tries > deadline:
                 break
             _sleep(min(2.0 * tries, 8.0))
     finally:
         lock.release()
+        ok = r is not None and 200 <= r.status_code < 300
+        _count(waiting=-1, http_attempts=sends, retried=max(0, sends - 1),
+               **{"delivered" if ok else "failed": 1})
     if r is not None:
         return r
     raise error or requests.exceptions.RetryError(f"webhook still rate limited after {max_wait_s:.0f}s")
@@ -211,4 +245,6 @@ if __name__ == "__main__":
         raise AssertionError("expected a network error")
     except requests.RequestException:
         pass
+    s = stats()
+    assert (s["delivered"], s["failed"], s["rate_limited"], s["waiting"]) == (3, 2, 1, 0), s
     print("webhook_gate ok")

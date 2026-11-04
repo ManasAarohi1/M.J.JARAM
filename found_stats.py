@@ -9,8 +9,8 @@ import faulthandler
 from pathlib import Path
 from typing import Dict, Optional
 
-from PySide6.QtCore import QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPainterPath, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -383,10 +383,20 @@ class FoundStatsMixin:
         P_HSY = _stable_u32("hsy")
         P_HSD = _stable_u32("hsd")
         P_HSL = _stable_u32("hsl")
+        P_HZX = _stable_u32("hzx")
+        P_HZY = _stable_u32("hzy")
+        P_HZSP = _stable_u32("hzsp")
+        P_HZR = _stable_u32("hzr")
+        P_HZA = _stable_u32("hza")
 
         P_BRX = _stable_u32("brx")
         P_BRW = _stable_u32("brw")
         P_BRA = _stable_u32("bra")
+        P_INCX = _stable_u32("incx")
+        P_INCY = _stable_u32("incy")
+        P_INCSP = _stable_u32("incsp")
+        P_INCL = _stable_u32("incl")
+        P_INCJ = _stable_u32("incj")
 
         P_STSPX = _stable_u32("stspx")
         P_STSPY = _stable_u32("stspy")
@@ -453,6 +463,12 @@ class FoundStatsMixin:
         P_SGSP = _stable_u32("sgsp")
         P_SGR = _stable_u32("sgr")
         P_SGPH = _stable_u32("sgph")
+
+        P_FX = _stable_u32("forest_x")
+        P_FY = _stable_u32("forest_y")
+        P_FSP = _stable_u32("forest_speed")
+        P_FPH = _stable_u32("forest_phase")
+        P_FSZ = _stable_u32("forest_size")
 
         P_M = _stable_u32("m")
         P_RS = _stable_u32("rs")
@@ -526,6 +542,56 @@ class FoundStatsMixin:
 
                 # Constant “rainy splash” brush color
                 self._splash = QColor(190, 220, 255, 70)
+
+                # Reuse the same pointed leaf outline for both forest effects.
+                self._forest_leaf = QPainterPath()
+                self._forest_leaf.moveTo(-1.0, 0.0)
+                self._forest_leaf.quadTo(0.0, -0.85, 1.0, 0.0)
+                self._forest_leaf.quadTo(0.0, 0.85, -1.0, 0.0)
+                self._forest_leaf.closeSubpath()
+
+                self._forest_ray = QPainterPath()
+                self._forest_ray.moveTo(-0.12, 0.0)
+                self._forest_ray.lineTo(0.12, 0.0)
+                self._forest_ray.lineTo(0.85, 1.0)
+                self._forest_ray.lineTo(0.20, 1.0)
+                self._forest_ray.closeSubpath()
+
+                # Periodic, feathered textures avoid hard oval edges and tile seams.
+                self._forest_fog = {
+                    "THE RADIANT FOREST": self._make_forest_fog(174, 133, 230),
+                    "LOST FOREST": self._make_forest_fog(120, 167, 143),
+                }
+                self._forest_firefly = QImage(24, 24, QImage.Format.Format_ARGB32_Premultiplied)
+                self._forest_firefly.fill(Qt.GlobalColor.transparent)
+                halo = QRadialGradient(QPointF(12.0, 12.0), 12.0)
+                halo.setColorAt(0.0, QColor(249, 255, 221, 255))
+                halo.setColorAt(0.10, QColor(216, 255, 204, 235))
+                halo.setColorAt(0.24, QColor(164, 247, 213, 90))
+                halo.setColorAt(0.55, QColor(140, 230, 219, 24))
+                halo.setColorAt(1.0, QColor(140, 230, 219, 0))
+                fog_painter = QPainter(self._forest_firefly)
+                fog_painter.fillRect(self._forest_firefly.rect(), halo)
+                fog_painter.end()
+
+            @staticmethod
+            def _make_forest_fog(red: int, green: int, blue: int) -> QImage:
+                width, height = 256, 64
+                pixels = bytearray(width * height * 4)
+                for x in range(width):
+                    phase = math.tau * x / width
+                    ridge_a = 0.46 + 0.12 * math.sin(phase) + 0.06 * math.sin(phase * 3.0)
+                    ridge_b = 0.67 + 0.10 * math.sin(phase * 2.0 + 1.3)
+                    density = 0.65 + 0.20 * math.sin(phase * 2.0 + 0.7)
+                    for y in range(height):
+                        fy = y / (height - 1)
+                        wisps = math.exp(-((fy - ridge_a) / 0.18) ** 2)
+                        wisps += 0.55 * math.exp(-((fy - ridge_b) / 0.12) ** 2)
+                        edge_fade = math.sin(math.pi * fy) ** 2
+                        alpha = min(100, int(100.0 * wisps * density * edge_fade))
+                        offset = (y * width + x) * 4
+                        pixels[offset:offset + 4] = bytes((red, green, blue, alpha))
+                return QImage(pixels, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
 
             def paint(self, painter, option, index) -> None:
                 t0_perf = time.perf_counter() if FOUND_STATS_DEBUG else 0.0
@@ -627,12 +693,16 @@ class FoundStatsMixin:
                 is_glitch = biome_key == "GLITCHED"
                 is_dream = biome_key == "DREAMSPACE"
                 is_blazing = biome_key == "BLAZING SUN"
+                is_incinerator = biome_key == "INCINERATOR"
                 is_grave = biome_key == "GRAVEYARD"
                 is_pumpkin = biome_key == "PUMPKIN MOON"
                 is_blood = biome_key == "BLOOD RAIN"
                 is_aurora = biome_key == "AURORA"
                 is_eggland = biome_key == "EGGLAND"
                 is_singularity = biome_key == "SINGULARITY"
+                is_radiant_forest = biome_key == "THE RADIANT FOREST"
+                is_lost_forest = biome_key == "LOST FOREST"
+                is_forest = is_radiant_forest or is_lost_forest
 
                 is_void = is_null or is_corruption
                 is_celestial = is_starfall or is_aurora or is_heaven
@@ -694,6 +764,13 @@ class FoundStatsMixin:
                     hue_amp = 0.06
                     shimmer = 1.00
                     glow_alpha = 140
+                elif is_incinerator:
+                    # Blazing Sun pushed into a furnace-overload profile.
+                    speed *= 2.35
+                    amp *= 1.45
+                    hue_amp = 0.035
+                    shimmer = 1.40
+                    glow_alpha = 195
                 elif is_starfall:
                     speed *= 0.90
                     amp *= 1.00
@@ -724,6 +801,17 @@ class FoundStatsMixin:
                     hue_amp = 0.15
                     shimmer = 1.05
                     glow_alpha = 140
+                elif is_radiant_forest:
+                    speed *= 0.75
+                    hue_amp = 0.035
+                    shimmer = 1.35
+                    glow_alpha = 170
+                elif is_lost_forest:
+                    speed *= 0.48
+                    amp *= 0.65
+                    hue_amp = 0.025
+                    shimmer = 0.40
+                    glow_alpha = 75
                 elif is_cyber:
                     speed *= 1.10
                     amp *= 0.85
@@ -783,6 +871,89 @@ class FoundStatsMixin:
 
                 # --- Background "atmosphere" per biome (behind the text) --------
                 try:
+                    if is_forest:
+                        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                        painter.setPen(Qt.PenStyle.NoPen)
+
+                        if is_radiant_forest:
+                            # Shafts of enchanted light sweep slowly through the canopy.
+                            ray_light = QLinearGradient(0.0, 0.0, 0.0, 1.0)
+                            ray_light.setColorAt(0.0, QColor(203, 163, 255, 75))
+                            ray_light.setColorAt(0.45, QColor(172, 206, 255, 35))
+                            ray_light.setColorAt(1.0, QColor(151, 243, 225, 0))
+                            painter.setBrush(ray_light)
+                            for k in range(7):
+                                ray_x = rx0 + rw0 * (k + 0.3) / 7.0
+                                ray_x += math.sin(t * 0.38 + k + phase0) * 10.0
+                                painter.save()
+                                try:
+                                    painter.translate(ray_x, ry0)
+                                    painter.scale(15.0 + 12.0 * _r01(P_FSZ, k, 3), rh0)
+                                    painter.drawPath(self._forest_ray)
+                                finally:
+                                    painter.restore()
+
+                        # Counter-drifting translucent wisps form layers of rolling fog.
+                        fog = self._forest_fog[biome_key]
+                        tile_w = max(140.0, rw0 * 0.72)
+                        painter.save()
+                        try:
+                            for layer in range(3):
+                                direction = 1.0 if layer % 2 == 0 else -1.0
+                                offset = (t * (8.0 + 5.0 * layer) * direction + tile_w * layer * 0.31) % tile_w
+                                fog_y = ry0 + rh0 * (0.02 + 0.19 * layer)
+                                fog_y += math.sin(t * 0.32 + layer * 1.9 + phase0) * rh0 * 0.06
+                                painter.setOpacity(0.31 if is_radiant_forest else 0.36)
+                                for tile in range(int(math.ceil(rw0 / tile_w)) + 1):
+                                    painter.drawImage(QRectF(rx0 - offset + tile * tile_w, fog_y, tile_w, rh0), fog)
+                        finally:
+                            painter.restore()
+
+                        # Leaves rise in the radiant updraft and tumble down in Lost Forest.
+                        leaf = QColor()
+                        for k in range(18 if is_radiant_forest else 8):
+                            leaf_phase = phase0 + math.tau * _r01(P_FPH, k)
+                            travel = (t * (5.0 + 7.0 * _r01(P_FSP, k)) + (rh0 + 16.0) * _r01(P_FY, k)) % (rh0 + 16.0)
+                            leaf_y = rbottom + 8.0 - travel if is_radiant_forest else ry0 - 8.0 + travel
+                            leaf_x = rx0 + rw0 * _r01(P_FX, k) + math.sin(t * 0.85 + leaf_phase) * 9.0
+                            leaf_hue = (0.73 + 0.10 * _r01(P_FPH, k)) if is_radiant_forest else (0.27 + 0.12 * _r01(P_FPH, k))
+                            leaf.setHsvF(leaf_hue, 0.48 if is_radiant_forest else 0.65, 0.95 if is_radiant_forest else 0.68, 0.55)
+                            painter.setBrush(leaf)
+                            painter.save()
+                            try:
+                                painter.translate(leaf_x, leaf_y)
+                                painter.rotate(35.0 * math.sin(t * 1.10 + leaf_phase) + t * (22.0 if is_radiant_forest else 38.0))
+                                leaf_size = 2.8 + 1.8 * _r01(P_FSZ, k)
+                                painter.scale(leaf_size, leaf_size)
+                                painter.drawPath(self._forest_leaf)
+                            finally:
+                                painter.restore()
+
+                        if is_radiant_forest:
+                            # A denser cloud of luminous fireflies and occasional starbursts.
+                            painter.save()
+                            try:
+                                for k in range(36):
+                                    fly_phase = phase0 + math.tau * _r01(P_FPH, k, 2)
+                                    fly_x = rx0 + rw0 * _r01(P_FX, k, 2) + math.sin(t * 0.80 + fly_phase) * 9.0
+                                    fly_travel = t * (4.0 + 8.0 * _r01(P_FSP, k, 2))
+                                    fly_y = rbottom + 6.0 - ((fly_travel + (rh0 + 12.0) * _r01(P_FY, k, 2)) % (rh0 + 12.0))
+                                    pulse = 0.5 + 0.5 * math.sin(t * 2.4 + fly_phase)
+                                    radius = 3.0 + 2.0 * _r01(P_FSZ, k, 2) + pulse
+                                    painter.setOpacity(0.40 + 0.60 * pulse)
+                                    painter.drawImage(
+                                        QRectF(fly_x - radius, fly_y - radius, radius * 2.0, radius * 2.0),
+                                        self._forest_firefly,
+                                    )
+                                    if k % 4 == 0 and pulse > 0.70:
+                                        painter.setPen(QColor(238, 255, 220, int(180.0 * pulse)))
+                                        arm = 1.5 + pulse
+                                        painter.drawLine(QPointF(fly_x - arm, fly_y), QPointF(fly_x + arm, fly_y))
+                                        painter.drawLine(QPointF(fly_x, fly_y - arm), QPointF(fly_x, fly_y + arm))
+                            finally:
+                                painter.restore()
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+
                     if is_rainy or is_blood:
                         col = QColor(base)
                         if is_blood:
@@ -826,18 +997,47 @@ class FoundStatsMixin:
                             if (k % 3) == 0:
                                 painter.drawLine(QPointF(x0, y0), QPointF(x0 + 7.5, y0 + 1.1))
 
-                    if is_hell or is_blazing:
-                        ember = QColor(255, 160, 40, 185 if is_hell else 200)
+                    if is_hell or is_blazing or is_incinerator:
+                        if is_incinerator:
+                            ember = QColor(255, 105, 24, 235)
+                            ember_count = 36
+                        else:
+                            ember = QColor(255, 160, 40, 185 if is_hell else 200)
+                            ember_count = 22 if is_hell else 15
                         painter.setPen(ember)
-                        for k in range(22 if is_hell else 15):
+                        for k in range(ember_count):
                             x0 = rx0 + rw0 * _r01(P_EX, k)
-                            sp = (18.0 if is_hell else 14.0) + 40.0 * _r01(P_ESP, k)
+                            if is_incinerator:
+                                sp = 32.0 + 78.0 * _r01(P_ESP, k)
+                            else:
+                                sp = (18.0 if is_hell else 14.0) + 40.0 * _r01(P_ESP, k)
                             y0 = rbottom - ((t * sp + (rh0 + 20.0) * _r01(P_EY, k)) % (rh0 + 20.0))
                             painter.drawPoint(QPointF(x0, y0))
-                            if (k % 3) == 0:
-                                painter.drawLine(QPointF(x0, y0), QPointF(x0, y0 - (4.0 + 9.0 * _r01(P_EL, k))))
+                            streak_mod = 2 if is_incinerator else 3
+                            if (k % streak_mod) == 0:
+                                extra_len = 5.0 if is_incinerator else 0.0
+                                painter.drawLine(
+                                    QPointF(x0, y0),
+                                    QPointF(x0, y0 - (4.0 + extra_len + 9.0 * _r01(P_EL, k))),
+                                )
 
                         if is_hell:
+                            # A restrained crimson haze drifting behind Hell's sparks.
+                            painter.setPen(QColor(0, 0, 0, 0))
+                            haze = QColor(150, 18, 10)
+                            for k in range(5):
+                                travel = rw0 + 70.0
+                                haze_p = (t * (0.035 + 0.030 * _r01(P_HZSP, k)) + _r01(P_HZX, k)) % 1.0
+                                haze_x = rx0 - 35.0 + haze_p * travel
+                                haze_y = ry0 + rh0 * (0.30 + 0.48 * _r01(P_HZY, k))
+                                haze_y += math.sin(t * 0.42 + k * 1.35 + phase0) * 1.2
+                                haze_rx = 24.0 + 18.0 * _r01(P_HZR, k)
+                                haze_ry = 5.0 + 3.5 * _r01(P_HZR, k, 1)
+                                haze.setAlpha(12 + int(12.0 * _r01(P_HZA, k)))
+                                painter.setBrush(haze)
+                                painter.drawEllipse(QPointF(haze_x, haze_y), haze_rx, haze_ry)
+                            painter.setBrush(Qt.BrushStyle.NoBrush)
+
                             # Extra sparks for HELL.
                             spark = QColor(255, 80, 20, 150)
                             painter.setPen(spark)
@@ -849,14 +1049,23 @@ class FoundStatsMixin:
                                 ln = 3.0 + 11.0 * _r01(P_HSL, k)
                                 painter.drawLine(QPointF(x0 + drift, y0), QPointF(x0 + drift, y0 - ln))
 
-                        if is_blazing:
-                            # Sun rays from the top.
-                            for k in range(8):
+                        if is_blazing or is_incinerator:
+                            # Blazing sunlight; Incinerator turns it into dense furnace beams.
+                            ray_count = 12 if is_incinerator else 8
+                            for k in range(ray_count):
                                 x_center = rx0 + rw0 * _r01(P_BRX, k)
-                                x_center += math.sin(t * 0.35 + k * 0.9 + phase0) * 6.0
-                                w = 10.0 + 22.0 * _r01(P_BRW, k)
+                                ray_drift = 9.0 if is_incinerator else 6.0
+                                x_center += math.sin(t * (0.62 if is_incinerator else 0.35) + k * 0.9 + phase0) * ray_drift
+                                if is_incinerator:
+                                    w = 7.0 + 18.0 * _r01(P_BRW, k)
+                                else:
+                                    w = 10.0 + 22.0 * _r01(P_BRW, k)
 
-                                a0 = 18 + int(55.0 * _r01(P_BRA, k) + 30.0 * abs(math.sin(t * 0.85 + k + phase0)))
+                                if is_incinerator:
+                                    blast = abs(math.sin(t * 2.15 + k * 0.72 + phase0))
+                                    a0 = 42 + int(82.0 * _r01(P_BRA, k) + 54.0 * blast)
+                                else:
+                                    a0 = 18 + int(55.0 * _r01(P_BRA, k) + 30.0 * abs(math.sin(t * 0.85 + k + phase0)))
                                 a1 = max(0, int(a0 * 0.45))
                                 a2 = max(0, int(a0 * 0.18))
 
@@ -865,9 +1074,14 @@ class FoundStatsMixin:
                                 h3 = max(0, int(rh0) - (h1 + h2))
 
                                 xl = x_center - (w * 0.50)
-                                col0 = QColor(255, 220, 120, a0)
-                                col1 = QColor(255, 200, 90, a1)
-                                col2 = QColor(255, 180, 60, a2)
+                                if is_incinerator:
+                                    col0 = QColor(255, 105, 30, a0)
+                                    col1 = QColor(240, 45, 8, a1)
+                                    col2 = QColor(150, 8, 0, a2)
+                                else:
+                                    col0 = QColor(255, 220, 120, a0)
+                                    col1 = QColor(255, 200, 90, a1)
+                                    col2 = QColor(255, 180, 60, a2)
                                 if h1 > 0:
                                     painter.fillRect(QRect(int(xl), int(ry0), int(w), h1), col0)
                                 if h2 > 0:
@@ -877,15 +1091,38 @@ class FoundStatsMixin:
 
                                 cw = max(2.0, w * 0.30)
                                 cxl = x_center - (cw * 0.50)
-                                cc0 = QColor(255, 245, 190, int(a0 * 0.55))
-                                cc1 = QColor(255, 230, 150, int(a1 * 0.55))
-                                cc2 = QColor(255, 210, 120, int(a2 * 0.55))
+                                if is_incinerator:
+                                    cc0 = QColor(255, 246, 195, int(a0 * 0.78))
+                                    cc1 = QColor(255, 175, 70, int(a1 * 0.72))
+                                    cc2 = QColor(255, 75, 20, int(a2 * 0.65))
+                                else:
+                                    cc0 = QColor(255, 245, 190, int(a0 * 0.55))
+                                    cc1 = QColor(255, 230, 150, int(a1 * 0.55))
+                                    cc2 = QColor(255, 210, 120, int(a2 * 0.55))
                                 if h1 > 0:
                                     painter.fillRect(QRect(int(cxl), int(ry0), int(cw), h1), cc0)
                                 if h2 > 0:
                                     painter.fillRect(QRect(int(cxl), int(ry0) + h1, int(cw), h2), cc1)
                                 if h3 > 0:
                                     painter.fillRect(QRect(int(cxl), int(ry0) + h1 + h2, int(cw), h3), cc2)
+
+                        if is_incinerator:
+                            # Fast white-hot ejecta and rising blast fronts sell the overload.
+                            for k in range(18):
+                                x0 = rx0 + rw0 * _r01(P_INCX, k)
+                                sp = 54.0 + 105.0 * _r01(P_INCSP, k)
+                                y0 = rbottom - ((t * sp + (rh0 + 30.0) * _r01(P_INCY, k)) % (rh0 + 30.0))
+                                lean = 1.5 + 5.5 * _r01(P_INCL, k)
+                                hot = QColor(255, 242, 188, 155 + int(85.0 * _r01(P_BRA, k)))
+                                painter.setPen(hot)
+                                painter.drawLine(QPointF(x0, y0), QPointF(x0 + lean, y0 - 3.0 - lean))
+
+                            for k in range(3):
+                                p = (t * (0.85 + 0.12 * k) + _r01(P_INCY, k, 91)) % 1.0
+                                y0 = rbottom - p * (rh0 + 4.0)
+                                fade = 1.0 - p
+                                band = QColor(255, 70 + 35 * k, 15, int(75.0 * fade))
+                                painter.fillRect(QRect(int(rx0), int(y0), int(rw0), 1 + (k % 2)), band)
 
                     if is_starfall:
                         star = QColor(220, 235, 255, 155)
@@ -1215,9 +1452,13 @@ class FoundStatsMixin:
                     global_dy += math.sin(t * 2.20 + phase0) * 0.6
                 if is_sand:
                     global_dx += math.sin(t * 1.10 + phase0) * 1.2
-                if is_hell or is_blazing:
-                    global_dx += math.sin(t * 3.20 + phase0) * 0.9
-                    global_dy += math.sin(t * 2.70 + phase0) * 0.4
+                if is_hell or is_blazing or is_incinerator:
+                    if is_incinerator:
+                        global_dx += math.sin(t * 5.20 + phase0) * 1.55
+                        global_dy += math.sin(t * 4.35 + phase0) * 0.85
+                    else:
+                        global_dx += math.sin(t * 3.20 + phase0) * 0.9
+                        global_dy += math.sin(t * 2.70 + phase0) * 0.4
                 if is_cyber:
                     global_dx *= 0.35
                     global_dy *= 0.15
@@ -1257,6 +1498,8 @@ class FoundStatsMixin:
                 sweep_speed = 1.4
                 if is_cyber:
                     sweep_speed = 2.6
+                elif is_incinerator:
+                    sweep_speed = 3.35
                 elif is_blazing:
                     sweep_speed = 2.2
                 elif is_starfall:
@@ -1265,6 +1508,8 @@ class FoundStatsMixin:
                     sweep_speed = 1.0
                 elif is_singularity:
                     sweep_speed = 1.8
+                elif is_radiant_forest:
+                    sweep_speed = 1.15
                 sweep_pos = ((t * sweep_speed) + float((seed >> 16) % 13)) % float(len(text) + 10) - 5.0
 
                 scan_y = ry0 + ((t * 70.0 + float(seed % 997)) % rh0)
@@ -1272,7 +1517,7 @@ class FoundStatsMixin:
                 shadow = QColor(0, 0, 0, 150)
                 if is_void:
                     shadow = QColor(10, 0, 20, 170)
-                if is_hell or is_blood:
+                if is_hell or is_blood or is_incinerator:
                     shadow = QColor(30, 0, 0, 180)
                 if is_singularity:
                     shadow = QColor(4, 8, 28, 185)
@@ -1369,6 +1614,16 @@ class FoundStatsMixin:
                         flare = abs(math.sin(t * 4.20 + ph))
                         dy -= flare * (amp * 1.25)
                         dx += math.sin(t * 6.30 + ph) * (amp * 0.28)
+                    elif is_incinerator:
+                        # Furnace blast: sharper lift, violent shimmer, and brief thermal jolts.
+                        flare = abs(math.sin(t * 7.60 + ph))
+                        surge = abs(math.sin(t * 3.10 + phase0))
+                        dy -= (flare * amp * 1.85) + (surge * amp * 0.35)
+                        dx += math.sin(t * 9.40 + ph) * (amp * 0.38)
+                        inc_frame = int(t * 18.0)
+                        inc_seed = _u32(P_INCJ, inc_frame, i)
+                        dx += (((inc_seed & 0xFF) / 255.0) - 0.5) * (amp * 0.45)
+                        dy += ((((inc_seed >> 8) & 0xFF) / 255.0) - 0.5) * (amp * 0.20)
                     elif is_starfall:
                         # Starry twinkle jitter (no wave).
                         dy += math.sin(t * 1.60 + ph) * (amp * 0.35)
@@ -1404,6 +1659,14 @@ class FoundStatsMixin:
                         dx += math.sin(spin) * (amp * (0.30 + 0.45 * pull))
                         dy += math.cos(spin * 1.18) * (amp * (0.55 + 0.30 * pull))
                         dx -= center_offset * 0.14 * (0.55 + 0.45 * math.sin(t * 1.20 + ph))
+                    elif is_radiant_forest:
+                        # A soft, coordinated lift like leaves in an enchanted breeze.
+                        dy += math.sin(t * 1.05 + i * 0.32 + phase0) * (amp * 0.65)
+                        dx += math.sin(t * 0.70 + ph) * (amp * 0.20)
+                    elif is_lost_forest:
+                        # Slow, uneven swaying through the mist.
+                        dy += math.sin(t * 0.60 + ph) * (amp * 0.40)
+                        dx += math.sin(t * 0.45 + i * 0.24 + phase0) * (amp * 0.35)
                     elif is_corruption:
                         # Corrupted crawl + occasional snap (no wave).
                         frame = int(t * 10.0)
@@ -1487,11 +1750,18 @@ class FoundStatsMixin:
                         hue = (0.78 + 0.05 * math.sin(t * 1.6 + i * 0.2 + phase0)) % 1.0
                         sat = _clamp01(sat * 0.95)
                         val = _clamp01(val * 0.92)
-                    if is_hell or is_blazing:
-                        heat = abs(math.sin(t * (2.4 if is_hell else 2.0) + i * 0.12 + phase0))
-                        hue = (0.02 + 0.10 * heat + (0.006 * i)) % 1.0
-                        sat = _clamp01(max(sat, 0.75))
-                        val = _clamp01(max(val, 0.55 + 0.50 * heat))
+                    if is_hell or is_blazing or is_incinerator:
+                        if is_incinerator:
+                            heat = abs(math.sin(t * 3.40 + i * 0.19 + phase0))
+                            white_hot = heat * heat * heat
+                            hue = (0.008 + 0.105 * heat + (0.004 * i)) % 1.0
+                            sat = _clamp01(max(sat, 0.88) * (1.0 - 0.58 * white_hot))
+                            val = _clamp01(max(val, 0.68 + 0.45 * heat))
+                        else:
+                            heat = abs(math.sin(t * (2.4 if is_hell else 2.0) + i * 0.12 + phase0))
+                            hue = (0.02 + 0.10 * heat + (0.006 * i)) % 1.0
+                            sat = _clamp01(max(sat, 0.75))
+                            val = _clamp01(max(val, 0.55 + 0.50 * heat))
                     if is_blood:
                         hue = (0.0 + 0.01 * math.sin(t * 1.1 + i * 0.15 + phase0)) % 1.0
                         sat = _clamp01(max(sat, 0.80))
@@ -1520,6 +1790,16 @@ class FoundStatsMixin:
                         hue = (0.58 + (0.10 * well) + (pos * 0.04)) % 1.0
                         sat = _clamp01(max(sat * 0.95, 0.72))
                         val = _clamp01(max(val * 0.92, 0.55 + 0.38 * well))
+                    if is_radiant_forest:
+                        bloom = 0.5 + 0.5 * math.sin(t * 1.05 + i * 0.28 + phase0)
+                        hue = (hue0 + 0.035 * math.sin(t * 0.70 + i * 0.18 + phase0)) % 1.0
+                        sat = 0.48 + 0.25 * bloom
+                        val = 0.82 + 0.18 * bloom
+                    elif is_lost_forest:
+                        breath = 0.5 + 0.5 * math.sin(t * 0.65 + i * 0.20 + phase0)
+                        hue = (hue0 + 0.025 * math.sin(t * 0.45 + i * 0.15 + phase0)) % 1.0
+                        sat = 0.60 + 0.16 * breath
+                        val = 0.62 + 0.18 * breath
                     if is_glitch:
                         # Hard swap between RGB primaries + white (no hue drifting).
                         rgb_frame = int(t * 8.0)
@@ -1536,7 +1816,7 @@ class FoundStatsMixin:
 
                     # Highlight/sweep (stars, aurora ribbon, cyber scanline, sun flare).
                     hi = 0.0
-                    if is_starfall or is_aurora or is_heaven or is_cyber or is_blazing or is_eggland or is_singularity:
+                    if is_starfall or is_aurora or is_heaven or is_cyber or is_blazing or is_incinerator or is_eggland or is_singularity or is_radiant_forest:
                         radius = 3.0
                         if is_aurora:
                             radius = 4.6
@@ -1544,6 +1824,8 @@ class FoundStatsMixin:
                             radius = 3.8
                         elif is_cyber:
                             radius = 2.2
+                        elif is_incinerator:
+                            radius = 4.2
                         elif is_eggland:
                             radius = 4.0
                         elif is_singularity:
@@ -1551,6 +1833,9 @@ class FoundStatsMixin:
                         dist = abs(float(i) - float(sweep_pos))
                         hi = max(0.0, 1.0 - dist / radius)
                         hi *= hi
+                    if is_incinerator:
+                        furnace_pulse = 0.5 + 0.5 * math.sin(t * 4.60 + phase0 + i * 0.08)
+                        hi = max(hi, 0.42 * furnace_pulse * furnace_pulse)
                     if is_singularity:
                         center_hi = max(0.0, 1.0 - abs(pos) * 2.4)
                         center_hi *= 0.45 + 0.55 * (0.5 + 0.5 * math.sin(t * 1.45 + phase0))
@@ -1655,15 +1940,27 @@ class FoundStatsMixin:
                         pt.setX(px + w * 0.40); pt.setY(py + 3.0)
                         painter.drawEllipse(pt, 1.2, 1.2)
 
-                    # Hell/Blazing: flame lick.
-                    if is_hell or is_blazing:
-                        if ((i + int(t * 10.0)) % 3) == 0:
-                            flame_h = 2.0 + 5.0 * abs(math.sin(t * 5.0 + i + phase0))
-                            flame_col.setRgb(255, 140, 50, 120 if is_hell else 160)
+                    # Hell/Blazing/Incinerator: flame lick.
+                    if is_hell or is_blazing or is_incinerator:
+                        flame_rate = 14.0 if is_incinerator else 10.0
+                        flame_mod = 2 if is_incinerator else 3
+                        if ((i + int(t * flame_rate)) % flame_mod) == 0:
+                            if is_incinerator:
+                                flame_h = 4.0 + 9.0 * abs(math.sin(t * 8.5 + i + phase0))
+                                flame_col.setRgb(255, 72, 16, 220)
+                            else:
+                                flame_h = 2.0 + 5.0 * abs(math.sin(t * 5.0 + i + phase0))
+                                flame_col.setRgb(255, 140, 50, 120 if is_hell else 160)
                             painter.setPen(flame_col)
                             p0.setX(px + w * 0.45); p0.setY(py - 2.0)
                             p1.setX(px + w * 0.45); p1.setY(py - 2.0 - flame_h)
                             painter.drawLine(p0, p1)
+                            if is_incinerator:
+                                flame_col.setRgb(255, 244, 190, 175)
+                                painter.setPen(flame_col)
+                                p0.setX(px + w * 0.45); p0.setY(py - 2.0)
+                                p1.setX(px + w * 0.45); p1.setY(py - 4.0 - flame_h * 0.55)
+                                painter.drawLine(p0, p1)
 
                     # Starfall: sparkle when highlighted.
                     if is_starfall and hi > 0.55:
@@ -1703,7 +2000,8 @@ class FoundStatsMixin:
                                 f"[BiomePaintSpike] biome={biome_key} row={index.row()} dt={dt_ms:.1f}ms "
                                 f"rect={cell_rect.width()}x{cell_rect.height()} text_len={len(text)} "
                                 f"glitch={is_glitch} cyber={is_cyber} rainy={is_rainy} snowy={is_snowy} "
-                                f"hell={is_hell} blazing={is_blazing} starfall={is_starfall} eggland={is_eggland} "
+                                f"hell={is_hell} blazing={is_blazing} incinerator={is_incinerator} "
+                                f"starfall={is_starfall} eggland={is_eggland} "
                                 f"singularity={is_singularity}"
                             )
                     # accumulate stats for summary printing

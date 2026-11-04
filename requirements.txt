@@ -2,8 +2,10 @@ PySide6
 psutil
 requests
 pywin32
+pydivert
 undetected-chromedriver
 selenium
+zendriver
 numpy
 Pillow
 pyautoit
