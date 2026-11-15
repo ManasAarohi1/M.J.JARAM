@@ -39,9 +39,11 @@ _DEV_ONLY_PACKAGE = "dev_only"
 
 # Optional biomes metadata (color, thumbnail). Fallbacks if missing.
 try:
-    from biomes import load_biomes_catalog, biome_meta, biome_names
+    from biomes import load_biomes_catalog, biome_meta, biome_names, merchant_meta
     load_biomes_catalog()
 except Exception:
+    def merchant_meta(name: str) -> Tuple[int, str]:
+        return {"JESTER": 0xA352FF, "MARI": 0xFF82AB, "RIN": 0xFF9F1C}.get(str(name).upper(), 0x7289DA), ""
     def biome_meta(name: str) -> Tuple[int, str]:
         return int(0x3BA55D), ""     # default color, empty thumbnail
     def biome_names() -> list[str]:
@@ -2361,8 +2363,10 @@ class MultiScopeEngine:
         self._event_window_trigger(str(uid), f"Merchant:{who}", event_time_utc.timestamp())
 
         if not self._merchant_hook:
+            self._log(f"[MultiScope] {who} found, but no merchant webhook is set (Webhooks > Merchants and bosses).")
             return
         if not self._merchant_filters.get(who, True):
+            self._log(f"[MultiScope] {who} found; its alert is turned off.")
             return
         server_label = self._display_server_label(server_key)
         detector     = self._get_username(uid) or uid
@@ -2373,7 +2377,7 @@ class MultiScopeEngine:
             return
 
         emojis = {"Jester": "🃏", "Mari": "🛍️", "Rin": "🦊"}
-        colors = {"Jester": 0xA352FF, "Mari": 0xFF82AB, "Rin": 0xFF9F1C}
+        color, thumb = merchant_meta(who)
         title  = f"{emojis.get(who,'📣')} {who} Has Arrived!"
         ts     = int(event_time_utc.timestamp())
         ts_full = f"<t:{ts}:D> • <t:{ts}:T>"
@@ -2389,10 +2393,12 @@ class MultiScopeEngine:
         payload = {"content": (self._ping_map.get(who, "") or ""), "embeds": [{
             "title": title,
             "description": desc,
-            "color": colors.get(who, 0x7289DA),
+            "color": color,
             "timestamp": event_time_utc.isoformat(),
             "footer": {"text": f"{APP_FOOTER}  •  {server_label}"}
         }]}
+        if thumb:
+            payload["embeds"][0]["thumbnail"] = {"url": thumb}
 
         if self._queue_webhook(self._merchant_hook, payload, f"Merchant {who}", detected_mono=detected_mono):
             scope.events += 1
@@ -2567,6 +2573,9 @@ class MultiScopeEngine:
             scope_key = self._server_key_for(uid)
             for match in iter_event_matches(line.rstrip("\r\n")):
                 event_id = match["event_id"]
+                # Hold first: a chat filter may post this boss, but the finder still gets its CPU hold.
+                if uid in self._first_merchant_scan_done:
+                    self._event_window_trigger(uid, f"Event:{event_id}", float(ts_epoch))
                 if event_id in self._disabled_log_events:
                     continue
                 with self._event_claim_lock:

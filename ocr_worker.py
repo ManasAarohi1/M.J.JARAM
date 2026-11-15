@@ -35,7 +35,7 @@ from ctypes import windll, wintypes
 from dataclasses import dataclass
 
 from multiscope import APP_FOOTER
-from events import EVENT_FILTER_IDS, build_event_payload, event_id_for_filter, event_webhook_targets
+from events import EVENT_FILTER_IDS, build_event_payload, event_filter_cooldown, event_id_for_filter, event_webhook_targets
 from wgc_capture import capture_window_wgc, configure_wgc_captures, release_wgc_captures
 
 # -----------------------------
@@ -1213,7 +1213,8 @@ def _normalize_filter_spec(raw: Dict[str, Any], *, fallback_index: int = 0) -> D
         "enabled": bool(base.get("enabled", default_spec.get("enabled", True))),
         "solo_ocr": solo_ocr,
         "target_text": str(base.get("target_text", default_spec.get("target_text", name)) or "").strip(),
-        "cooldown_seconds": float(base.get("cooldown_seconds", default_spec.get("cooldown_seconds", 600)) or 0.0),
+        "cooldown_seconds": (event_filter_cooldown(base) if behavior == "event" else
+                             float(base.get("cooldown_seconds", default_spec.get("cooldown_seconds", 600)) or 0.0)),
         "use_shared_area": bool(use_shared_area),
         "shared_area_id": shared_area_id,
         "roi": roi_dict,
@@ -2417,6 +2418,15 @@ class OCRWorker(QThread):
     # ---------------------- detection helpers ---------------------
     def _handle_detection(self, merchant: str, pid: int, raw_img: Image.Image) -> None:
         ctx = self._context_provider(pid) if self._context_provider else {}
+        claim = getattr(self, "merchant_claim", None)  # set by the GUI: one alert per server with the log reader
+        claim_uid = str(ctx.get("user_id") or "").strip()
+        if claim_uid and callable(claim):
+            try:
+                if not claim(claim_uid, str(merchant)):
+                    self._log(f"[DETECT] {str(merchant).upper()} in PID {pid}: already posted for this server.")
+                    return
+            except Exception:
+                pass
         try:
             uid = str(ctx.get("user_id") or "").strip()
             if uid and merchant:
@@ -2472,7 +2482,11 @@ class OCRWorker(QThread):
         ts_rel = f"<t:{ts_epoch}:R>"
 
         emojis = {"jester": "\U0001f0cf", "mari": "\U0001f6cd", "rin": "\U0001f98a"}
-        colors = {"jester": 0xA352FF, "mari": 0xFF82AB, "rin": 0xFF9F1C}
+        try:
+            from biomes import merchant_meta
+            color, thumb = merchant_meta(merchant)
+        except Exception:
+            color, thumb = {"jester": 0xA352FF, "mari": 0xFF82AB, "rin": 0xFF9F1C}.get(merchant, 0x7289DA), ""
         title = f"{emojis.get(merchant, '\U0001f4e3')} {merchant.title()} Has Arrived!"
 
         desc = (
@@ -2485,11 +2499,13 @@ class OCRWorker(QThread):
         embed = {
             "title": title,
             "description": desc,
-            "color": colors.get(merchant, 0x7289DA),
+            "color": color,
             "timestamp": ts.isoformat(),
             "footer": {"text": f"{APP_FOOTER} - {server_label}"},
             "image": {"url": "attachment://chat.png"},
         }
+        if thumb:
+            embed["thumbnail"] = {"url": thumb}
 
         payload = {
             "content": ping_map.get(merchant, ""),

@@ -608,18 +608,19 @@ def _candidate_ocr_filters_from_cfg(ocr_cfg: object) -> List[dict]:
 
 
 def _sinister_event_webhooks(ms: dict) -> List[dict]:
-    """The Webhooks page's Sinister S. row as the events.py webhook list (blank URL = merchant webhook)."""
+    """The Webhooks page's Sinister row as the events.py webhook list: Sinister S and Sinister P both post to
+    the Sinister webhook (blank = merchant webhook) with the same ping."""
     ms = ms if isinstance(ms, dict) else {}
     ping_type = str(ms.get("sinister_ping_type") or "None")
     mode = ("None" if not ms.get("enable_sinister", True)
             else "Everyone" if ping_type == "@everyone" else "Message")
     return normalize_event_webhooks([{
-        "event_id": "sinister_s",
+        "event_id": event_id,
         "url": str(ms.get("sinister_webhook") or ms.get("merchant_webhook") or "").strip(),
-        "event_modes": {"sinister_s": mode},
+        "event_modes": {event_id: mode},
         "ping_type": ping_type if ping_type in ("User ID", "Role ID") else "None",
         "ping_id": str(ms.get("sinister_ping_id") or "").strip(),
-    }])
+    } for event_id in ("sinister_s", "sinister_p")])
 
 
 def _ocr_event_ids_in_cfg(ocr_cfg: object) -> List[str]:
@@ -629,6 +630,53 @@ def _ocr_event_ids_in_cfg(ocr_cfg: object) -> List[str]:
     return [event_id_for_filter(spec) for spec in _candidate_ocr_filters_from_cfg(ocr_cfg)
             if spec.get("enabled", True) and str(spec.get("behavior") or "") == "event"
             and event_id_for_filter(spec)]
+
+
+class _RecentMerchantAlerts:
+    """One merchant alert per server. The log reader (engine process) and chat reading (this process) both
+    find merchants; whichever is first posts. ponytail: in memory, 5 minute window (a merchant stays ~3 min)."""
+
+    def __init__(self, window: float = 300.0) -> None:
+        self.window = float(window)
+        self._seen: Dict[tuple, float] = {}
+        self._lock = threading.Lock()
+
+    def note(self, key: str, who: str) -> None:
+        with self._lock:
+            self._seen[(key, str(who).lower())] = time.monotonic()
+
+    def claim(self, key: str, who: str) -> bool:
+        """True (and remembered) when nobody posted this merchant for this server in the window."""
+        k, now = (key, str(who).lower()), time.monotonic()
+        with self._lock:
+            last = self._seen.get(k)
+            if last is not None and now - last < self.window:
+                return False
+            self._seen[k] = now
+            if len(self._seen) > 2000:
+                self._seen = {kk: t for kk, t in self._seen.items() if now - t < self.window}
+            return True
+
+
+_MERCHANT_ALERTS = _RecentMerchantAlerts()
+
+
+def _merchant_server_key(wt, uid: object) -> str:
+    """Same server = same private server link, else same server label, else just this account."""
+    uid = str(uid or "").strip()
+    try:
+        ps = str(wt.get_ps_link_for_user(uid) or "").strip()
+    except Exception:
+        ps = ""
+    if ps:
+        return "ps:" + ps
+    try:
+        label = str(wt.manager.process_tracker.user_server.get(uid, "") or "").strip()
+    except Exception:
+        label = ""
+    if label and label.lower() != "unknown":
+        return "srv:" + label
+    return "uid:" + uid
 
 
 def _ocr_merchant_filters_enabled_in_cfg(ocr_cfg: object) -> bool:
@@ -653,14 +701,10 @@ def _ocr_merchant_filters_enabled_in_cfg(ocr_cfg: object) -> bool:
 
 
 def _should_disable_log_based_merchant_detection(settings_cfg: object) -> bool:
-    if not isinstance(settings_cfg, dict):
-        return False
-    misc_cfg = settings_cfg.get("misc")
-    if not isinstance(misc_cfg, dict):
-        misc_cfg = {}
-    if not bool(misc_cfg.get(MISC_DISABLE_LOG_MERCHANTS_WHEN_OCR_ACTIVE_KEY, True)):
-        return False
-    return _ocr_merchant_filters_enabled_in_cfg(settings_cfg.get("ocr"))
+    """Always False: the logs are always read for merchants. Chat reading used to switch them off (so each
+    merchant posted once), and a chat area that missed a merchant then meant no alert at all. Duplicates are
+    now stopped per server by _MERCHANT_ALERTS instead; the old misc setting is ignored."""
+    return False
 
 _SECONDS_PER_DAY = 86400.0
 _ACTIVITY_FRESH_DAYS = 1.0
@@ -7443,6 +7487,7 @@ class WorkerThread(QThread):
                                 self._handle_user_menu_exit(uid, payload)
                                 continue
                             if kind == "merchant":
+                                _MERCHANT_ALERTS.note(_merchant_server_key(self, uid), str(payload))
                                 self.merchant_signal.emit(str(uid), str(payload))
                                 continue
                             if kind == "disconnect":
@@ -18576,7 +18621,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
     def _ocr_filter_presets_catalog(self) -> Dict[str, List[dict]]:
         return copy.deepcopy(
             {
-                "Halloween": [get_event_ocr_preset("sinister_s")],
+                "Halloween": [get_event_ocr_preset("sinister_s"), get_event_ocr_preset("sinister_p")],
                 "Egg Hunt": [
                     {
                         "name": "Sky Festival",
@@ -20233,7 +20278,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         elif str(spec.get("behavior") or "") == "event":
             hook_le.setEnabled(False)
             msg_te.setEnabled(False)
-            hook_le.setToolTip("Posts to the Sinister S. webhook on the Webhooks page.")
+            hook_le.setToolTip("Posts to the Sinister webhook on the Webhooks page.")
             msg_te.setToolTip("Uses the built-in boss alert.")
 
         def _populate_shared_area_combo(selected_id: str = "") -> None:
@@ -20614,6 +20659,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             ms_settings=ms_cfg,
             context_provider=self._resolve_pid_context,
         )
+        self.ocr_worker.merchant_claim = self._claim_chat_merchant
         self.ocr_worker.log_signal.connect(self._handle_ocr_log)
         self.ocr_worker.status_signal.connect(self._handle_ocr_status)
         self.ocr_worker.merchant_signal.connect(self._handle_ocr_merchant)
@@ -20788,7 +20834,7 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             ms["enable_sinister"] = bool(self.ms_enable_sinister.isChecked())
             ms["sinister_ping_type"] = self.ms_sinister_type.currentText()
             ms["sinister_ping_id"] = self.ms_sinister_id.text().strip()
-        ms["event_webhooks"] = _sinister_event_webhooks(ms)  # the OCR worker's Sinister S. filter posts here
+        ms["event_webhooks"] = _sinister_event_webhooks(ms)  # the OCR worker's Sinister S / P filters post here
 
         misc = {}
         try:
@@ -20956,6 +21002,13 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
             "Frame Compare",
             f"{win.title}\n\nChanged: {diff_pct:.2f}%\nSkipped at: {tol:.0f}% or less\n\n{verdict}.",
         )
+
+    def _claim_chat_merchant(self, uid: str, merchant: str) -> bool:
+        """Chat reading asks before posting: False when the logs (or another window) already posted it."""
+        wt = self.worker_thread
+        if not uid or not wt:
+            return True
+        return _MERCHANT_ALERTS.claim(_merchant_server_key(wt, uid), merchant)
 
     def _resolve_pid_context(self, pid: int) -> Dict[str, Any]:
         try:
@@ -26076,11 +26129,11 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         ms_cfg = self._ms_settings_from_ui()
         tests = []
         if ms_cfg.get("enable_jester", True):
-            tests.append(("Jester", ms_cfg.get("jester_ping", ""), 0xA352FF))
+            tests.append(("Jester", ms_cfg.get("jester_ping", ""), None))
         if ms_cfg.get("enable_mari", True):
-            tests.append(("Mari", ms_cfg.get("mari_ping", ""), 0xFF82AB))
+            tests.append(("Mari", ms_cfg.get("mari_ping", ""), None))
         if ms_cfg.get("enable_rin", True):
-            tests.append(("Rin", ms_cfg.get("rin_ping", ""), 0xFF9F1C))
+            tests.append(("Rin", ms_cfg.get("rin_ping", ""), None))
         if not tests:
             QMessageBox.information(self, "Merchant Pings", "Enable Jester, Mari, or Rin pings to send a test.")
             return
@@ -26088,8 +26141,10 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
         now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         ok = 0
         fail = 0
-        for name, ping, color in tests:
+        from biomes import merchant_meta
+        for name, ping, _ in tests:
             desc = f"This is a test {name} merchant ping from Settings."
+            color, thumb = merchant_meta(name)
             payload = {
                 "content": ping or "",
                 "embeds": [{
@@ -26099,6 +26154,8 @@ class RobloxManagerGUI(QMainWindow, FoundStatsMixin):
                     "color": color
                 }]
             }
+            if thumb:
+                payload["embeds"][0]["thumbnail"] = {"url": thumb}
             try:
                 resp = webhook_gate.post(merchant_hook, json=payload, timeout=8, max_wait_s=8)
                 if resp.ok:

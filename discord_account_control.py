@@ -5,6 +5,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 try:
     import discord
     from discord.ext import commands
+    if not hasattr(discord, "Intents"):  # discord.py-self shares the "discord" folder and can't run a bot
+        raise ImportError(f"the installed 'discord' package is {getattr(discord, '__title__', 'not discord.py')}, "
+                          "not discord.py")
     DISCORD_IMPORT_ERROR: Optional[Exception] = None
 except Exception as exc:  # pragma: no cover - optional dependency
     discord = None  # type: ignore[assignment]

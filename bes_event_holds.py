@@ -7,6 +7,7 @@ import time
 import uuid
 
 from biomes import biome_duration, biome_names
+from events import EVENTS
 
 MERCHANTS = ("Jester", "Mari", "Rin")
 
@@ -16,7 +17,20 @@ _BRIDGE_LOCK = threading.Lock()
 def trigger_catalog():
     return [(f"Biome:{name}", name, biome_duration(name)) for name in biome_names()] + [
         (f"Merchant:{name}", name, 180) for name in MERCHANTS
+    ] + [
+        (f"Event:{event_id}", event["name"], event["hold_seconds"]) for event_id, event in EVENTS.items()
     ]
+
+
+def trigger_duration(trigger):
+    category, _, name = trigger.partition(":")
+    if category == "Merchant":
+        return 180 if name in MERCHANTS else None
+    if category == "Biome":
+        return biome_duration(name)
+    if category == "Event":
+        return EVENTS.get(name, {}).get("hold_seconds")
+    return None
 
 
 def normalize_event_holds(config):
@@ -42,7 +56,8 @@ def migrate_event_holds(settings):
         for trigger, _name, duration in trigger_catalog():
             rule = rules.get(trigger)
             rule = rule if isinstance(rule, dict) else {}
-            events[trigger] = bool(rule.get("hold_bes", legacy.get("hold_bes", False))) and bool(duration)
+            default_hold = legacy.get("hold_bes", False) if not trigger.startswith("Event:") else False
+            events[trigger] = bool(rule.get("hold_bes", default_hold)) and bool(duration)
         was_active = any(selected and isinstance(rules.get(trigger), dict) and rules[trigger].get("enabled")
                          for trigger, selected in events.items())
         bes["event_holds"] = {"enabled": bool(legacy.get("enabled")) and was_active, "events": events}
@@ -82,9 +97,7 @@ class BESEventHoldController:
         with self._lock:
             if not self.notify or not self.config["enabled"] or not self.config["events"].get(trigger):
                 return
-            category, _, name = trigger.partition(":")
-            duration = (180 if name in MERCHANTS else None) if category == "Merchant" else (
-                biome_duration(name) if category == "Biome" else None)
+            duration = trigger_duration(trigger)
             if not duration or duration <= 0 or not math.isfinite(event_ts) or event_ts > time.time():
                 return
             until = event_ts + duration

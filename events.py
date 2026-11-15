@@ -14,7 +14,18 @@ EVENTS = {
         "target_text": "Sinister S is patrolling the graveyard...",
         "color": 0x9598F9,
         "emoji": "🎃",
-        "cooldown_seconds": 200.0,
+        "cooldown_seconds": 300.0,
+        "hold_seconds": 300,
+    },
+    "sinister_p": {  # upstream J.JARAM, Nov 2026
+        "name": "Sinister P",
+        "asset_ids": ("138220970463286",),
+        "filter_id": "event_sinister_p",
+        "target_text": "Sinister P. has begun to orchestrate ruin!",
+        "color": 0xFF6600,
+        "emoji": "🎃",
+        "cooldown_seconds": 300.0,
+        "hold_seconds": 300,
     },
 }
 EVENT_FILTER_IDS = {event["filter_id"]: key for key, event in EVENTS.items()}
@@ -32,7 +43,9 @@ def get_event_ocr_preset(event_id: str) -> dict:
     event = EVENTS[event_id]
     return {
         "id": event["filter_id"], "name": event["name"],
-        "r": 149, "g": 152, "b": 249, "tol": 60,
+        "r": (event["color"] >> 16) & 0xFF,
+        "g": (event["color"] >> 8) & 0xFF,
+        "b": event["color"] & 0xFF, "tol": 60,
         "enabled": True, "solo_ocr": False,
         "target_text": event["target_text"],
         "cooldown_seconds": event["cooldown_seconds"],
@@ -54,6 +67,16 @@ def event_id_for_filter(spec: dict) -> str:
         return event_id
     name = str(spec.get("name") or "").strip().lower()
     return next((key for key, event in EVENTS.items() if event["name"].lower() == name), "")
+
+
+def event_filter_cooldown(spec: dict, default: float = 600.0) -> float:
+    event_id = event_id_for_filter(spec)
+    event = EVENTS.get(event_id, {})
+    cooldown = float(spec.get("cooldown_seconds", event.get("cooldown_seconds", default)) or 0.0)
+    # Upgrade the previous Sinister S preset value (200 s) while keeping custom chat-filter cooldowns.
+    if event_id == "sinister_s" and cooldown == 200.0:
+        return EVENTS[event_id]["cooldown_seconds"]
+    return cooldown
 
 
 def iter_event_matches(text: str) -> list[dict]:
